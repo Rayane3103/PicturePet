@@ -296,3 +296,4 @@ SELECT upgrade_user_tier(auth.uid(), 'silver');
 ---
 
 *This database schema provides a robust foundation for a credit-based photo editing application with comprehensive user management, tool tracking, and subscription handling.*
+# Picture_Pet

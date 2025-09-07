@@ -2,6 +2,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:io';
 import '../config/supabase_config.dart';
+import '../repositories/profile_repository.dart';
+import '../models/user_profile.dart';
+import '../utils/logger.dart';
 
 class AuthService {
   static final AuthService _instance = AuthService._internal();
@@ -9,6 +12,7 @@ class AuthService {
   AuthService._internal();
 
   final SupabaseClient _supabase = Supabase.instance.client;
+  final ProfileRepository _profiles = ProfileRepository();
 
   // Check if running on mobile platform
   bool get isMobilePlatform {
@@ -82,11 +86,12 @@ class AuthService {
   // Sign out
   Future<void> signOut() async {
     try {
-      print('AuthService: Starting sign out...');
+      Logger.info('AuthService: Starting sign out...');
+      _profiles.invalidateCache();
       await _supabase.auth.signOut();
-      print('AuthService: Sign out completed successfully');
+      Logger.info('AuthService: Sign out completed successfully');
     } catch (e) {
-      print('AuthService: Sign out error: $e');
+      Logger.error('AuthService: Sign out error', context: {'error': e.toString()});
       rethrow;
     }
   }
@@ -116,7 +121,7 @@ class AuthService {
   // Create user profile in profiles table
   Future<void> _createProfile(User user) async {
     try {
-      print('Creating profile for user: ${user.id}');
+      Logger.info('Creating profile for user', context: {'userId': user.id});
       
       // Handle different auth providers
       String? username;
@@ -131,31 +136,41 @@ class AuthService {
       } else {
         username = 'user_${user.id.substring(0, 8)}';
       }
-      
-      await _supabase.from('profiles').insert({
-        'id': user.id,
-        'email': user.email,
-        'username': username,
-        'tier': 'free_trial',
-        'credits': 50,
-        'storage_used_gb': 0,
-        'max_storage_gb': 2,
-        'max_projects': 5,
-        'trial_started_at': DateTime.now().toIso8601String(),
-        'trial_ends_at': DateTime.now().add(const Duration(days: 7)).toIso8601String(),
-        'is_trial_active': true,
-      });
-      print('Profile created successfully for user: ${user.id}');
+
+      final avatarUrl = user.userMetadata?['avatar_url'] ?? user.userMetadata?['picture'];
+      final profile = UserProfile(
+        id: user.id,
+        email: user.email,
+        username: username,
+        fullName: user.userMetadata?['full_name'] ?? user.userMetadata?['name'],
+        avatarUrl: avatarUrl is String ? avatarUrl : null,
+        tier: 'free_trial',
+        credits: 50,
+        storageUsedGb: 0,
+        maxStorageGb: 2,
+        maxProjects: 5,
+        trialStartedAt: DateTime.now(),
+        trialEndsAt: DateTime.now().add(const Duration(days: 7)),
+        isTrialActive: true,
+        metadata: user.userMetadata is Map<String, dynamic>
+            ? Map<String, dynamic>.from(user.userMetadata!)
+            : <String, dynamic>{},
+      );
+
+      await _profiles.upsertProfile(profile);
+      Logger.info('Profile created successfully for user', context: {'userId': user.id});
     } catch (e) {
-      print('Error creating profile: $e');
-      print('Error type: ${e.runtimeType}');
+      Logger.error('Error creating profile', context: {
+        'error': e.toString(),
+        'type': e.runtimeType.toString(),
+      });
       
       // If profile creation fails due to duplicate key, this might indicate
       // the user already exists but the auth signup succeeded
       if (e.toString().contains('duplicate key') || 
           e.toString().contains('unique constraint') ||
           e.toString().contains('already exists')) {
-        print('Profile already exists for user: ${user.id}');
+        Logger.warn('Profile already exists for user', context: {'userId': user.id});
         // This is not a critical error - the user can still proceed
       } else {
         // Re-throw other profile creation errors
@@ -168,16 +183,11 @@ class AuthService {
   Future<Map<String, dynamic>?> getUserProfile() async {
     try {
       if (currentUser == null) return null;
-      
-      final response = await _supabase
-          .from('profiles')
-          .select()
-          .eq('id', currentUser!.id)
-          .single();
-      
-      return response;
+
+      final profile = await _profiles.getCurrentUserProfile();
+      return profile?.toMap();
     } catch (e) {
-      print('Error getting user profile: $e');
+      Logger.error('Error getting user profile', context: {'error': e.toString()});
       return null;
     }
   }
@@ -186,14 +196,28 @@ class AuthService {
   Future<void> updateUserProfile(Map<String, dynamic> updates) async {
     try {
       if (currentUser == null) return;
-      
-      await _supabase
-          .from('profiles')
-          .update(updates)
-          .eq('id', currentUser!.id);
+
+      await _profiles.updateProfileFields(Map<String, Object?>.from(updates));
     } catch (e) {
       rethrow;
     }
+  }
+
+  // Typed helpers for profile access
+  Future<UserProfile?> fetchCurrentUserProfile({bool forceRefresh = false}) {
+    return _profiles.getCurrentUserProfile(forceRefresh: forceRefresh);
+  }
+
+  Future<UserProfile?> updateProfile({
+    String? fullName,
+    String? avatarUrl,
+    Map<String, dynamic>? metadata,
+  }) async {
+    final updates = <String, Object?>{};
+    if (fullName != null) updates['full_name'] = fullName;
+    if (avatarUrl != null) updates['avatar_url'] = avatarUrl;
+    if (metadata != null) updates['metadata'] = metadata;
+    return _profiles.updateProfileFields(updates);
   }
 
   // Check if user can use a specific tool

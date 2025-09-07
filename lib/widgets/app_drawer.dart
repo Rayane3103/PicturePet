@@ -51,7 +51,10 @@ class AppDrawer extends StatelessWidget {
                   _DrawerTile(
                     icon: Icons.photo_library_outlined,
                     label: 'My Uploads',
-                    onTap: () {},
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      Navigator.of(context).pushNamed('/media');
+                    },
                   ),
                   const SizedBox(height: 8),
                   _DrawerTile(
