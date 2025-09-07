@@ -14,15 +14,34 @@ import 'screens/home_shell.dart';
 import 'widgets/auth_wrapper.dart';
 import 'config/supabase_config.dart';
 import 'services/mobile_oauth_handler.dart';
+import 'utils/logger.dart';
+import 'screens/media_history_page.dart';
+import 'services/upload_queue_service.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
+// comment to test the sync of the replit, yes it's working fine.
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (details) {
+    Logger.error('FlutterError', context: {
+      'exception': details.exceptionAsString(),
+      'stack': details.stack?.toString(),
+    });
+  };
   
+  // Load .env (optional; ignores missing)
+  try {
+    await dotenv.load(fileName: '.env');
+  } catch (_) {}
+
   // Initialize Supabase
   await Supabase.initialize(
     url: SupabaseConfig.url,
     anonKey: SupabaseConfig.anonKey,
   );
+
+  // Log which secret names are present (never values)
+  Logger.info('Secrets status', context: SupabaseConfig.secretsStatus());
   
   runApp(const MediaUsApp());
 }
@@ -98,6 +117,13 @@ class _MediaUsAppState extends State<MediaUsApp> {
     MobileOAuthHandler.initialize();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Restore any pending uploads from previous sessions
+    UploadQueueService.instance.restoreQueue();
+  }
+
   void _handleDeepLink(Uri uri) {
     print('Handling deep link: $uri');
     
@@ -156,6 +182,7 @@ class _MediaUsAppState extends State<MediaUsApp> {
             onThemeModeChanged: _setThemeMode,
           ),
         ),
+        '/media': (context) => const MediaHistoryPage(),
       },
     );
   }

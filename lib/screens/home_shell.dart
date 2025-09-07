@@ -6,6 +6,8 @@ import '../widgets/app_drawer.dart';
 import 'dart:ui';
 import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../services/media_pipeline_service.dart';
+import '../screens/media_history_page.dart';
 
 class HomeShell extends StatefulWidget {
   final ThemeMode themeMode;
@@ -19,6 +21,7 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+  final MediaPipelineService _pipeline = MediaPipelineService();
 
   void _openAddSheet() {
     showModalBottomSheet(
@@ -99,7 +102,10 @@ class _HomeShellState extends State<HomeShell> {
                           fontSize: 14,
                         ),
                       ),
-                      onTap: () => Navigator.pop(context),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _pipeline.pickFromGalleryAndQueue();
+                      },
                     ),
                     Divider(
                       color: AppColors.background(context),
@@ -132,7 +138,10 @@ class _HomeShellState extends State<HomeShell> {
                           fontSize: 14,
                         ),
                       ),
-                      onTap: () => Navigator.pop(context),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _pipeline.captureFromCameraAndQueue();
+                      },
                     ),
                   ],
                 ),
