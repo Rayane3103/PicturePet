@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'dart:io';
 import '../config/supabase_config.dart';
 
@@ -340,6 +341,9 @@ class AuthService {
           'access_type': 'offline',
           'prompt': 'consent',
         },
+        authScreenLaunchMode: isMobilePlatform
+            ? LaunchMode.inAppWebView
+            : LaunchMode.platformDefault,
       );
       print('Google sign in initiated successfully');
     } catch (e) {
@@ -364,6 +368,9 @@ class AuthService {
       await _supabase.auth.signInWithOAuth(
         Provider.facebook,
         redirectTo: redirectUrl,
+        authScreenLaunchMode: isMobilePlatform
+            ? LaunchMode.inAppWebView
+            : LaunchMode.platformDefault,
       );
       print('Facebook sign in initiated successfully');
     } catch (e) {

@@ -47,6 +47,8 @@ dependencies:
   
   # Deep linking
   uni_links: ^0.5.1
+  # In-app webview for OAuth (used by Supabase signInWithOAuth)
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:
