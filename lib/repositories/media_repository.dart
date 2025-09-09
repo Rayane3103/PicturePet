@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -21,8 +20,9 @@ class MediaRepository {
       Logger.info('Uploading to storage', context: {'bucket': bucket, 'path': path});
       await _client.storage.from(bucket).uploadBinary(path, bytes, fileOptions: FileOptions(contentType: contentType, upsert: false));
     });
-    final publicUrl = _client.storage.from(bucket).getPublicUrl(path);
-    return publicUrl;
+    // Prefer signed URLs for private buckets
+    final signed = await _client.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7); // 7 days
+    return signed;
   }
 
   String _generateChecksum(Uint8List bytes) {
@@ -63,6 +63,7 @@ class MediaRepository {
     Uint8List? thumbnailBytes,
     String thumbnailContentType = 'image/jpeg',
     Map<String, dynamic> metadata = const {},
+    String? projectName,
   }) async {
     final user = _client.auth.currentUser;
     if (user == null) {
@@ -94,7 +95,7 @@ class MediaRepository {
       );
     }
 
-    return createMediaRecord(
+    final media = await createMediaRecord(
       ownerId: ownerId,
       storagePath: objectPath,
       url: url,
@@ -104,22 +105,38 @@ class MediaRepository {
       checksum: checksum,
       metadata: metadata,
     );
+    // Optionally create a project on first upload if a name is provided
+    if (projectName != null && projectName.isNotEmpty) {
+      try {
+        await retry(() async {
+          await _client.from('projects').insert({
+            'user_id': ownerId,
+            'name': projectName,
+            'original_image_url': url,
+            'thumbnail_url': thumbUrl,
+            'file_size_bytes': bytes.length,
+          });
+        });
+      } catch (e) {
+        Logger.warn('Project creation failed', context: {'error': e.toString()});
+      }
+    }
+    return media;
   }
 
   Future<List<MediaItem>> listMedia({int limit = 20, int offset = 0, String? filterMime}) async {
     final user = _client.auth.currentUser;
     if (user == null) return [];
-    final query = _client
+    var query = _client
         .from('media')
         .select()
-        .eq('owner_id', user.id)
-        .order('created_at', ascending: false)
-        .limit(limit)
-        .range(offset, offset + limit - 1);
+        .eq('owner_id', user.id);
     if (filterMime != null) {
-      query.ilike('mime_type', '$filterMime%');
+      query = query.ilike('mime_type', '$filterMime%');
     }
-    final rows = await query;
+    final rows = await query
+        .order('created_at', ascending: false)
+        .range(offset, offset + limit - 1);
     return List<Map<String, dynamic>>.from(rows).map(MediaItem.fromMap).toList();
   }
 }

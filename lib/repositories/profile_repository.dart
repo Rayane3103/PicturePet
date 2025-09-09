@@ -39,7 +39,7 @@ class ProfileRepository {
 
     final upserted = await retry<Map<String, dynamic>>(() async {
       Logger.info('Upserting profile', context: {'userId': profile.id});
-      final data = await _client.from('profiles').upsert(payload).select().eq('id', profile.id).single();
+      final data = await _client.from('profiles').upsert(payload).select().single();
       return Map<String, dynamic>.from(data);
     });
 

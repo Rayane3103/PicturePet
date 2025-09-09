@@ -1,4 +1,8 @@
 -- Buckets (create via dashboard if needed): media
+-- Ensure the 'media' bucket exists (private). Safe to run multiple times.
+insert into storage.buckets (id, name, public)
+values ('media', 'media', false)
+on conflict (id) do nothing;
 
 -- Media table
 create table if not exists public.media (
@@ -28,4 +32,38 @@ create policy "Insert own media" on public.media for insert with check (auth.uid
 drop policy if exists "Delete own media" on public.media;
 create policy "Delete own media" on public.media for delete using (auth.uid() = owner_id);
 
+
+-- Storage bucket policies for secure media ownership
+-- Ensure a bucket named 'media' exists in Supabase Storage
+-- Restrict access to objects under prefix u/{auth.uid()}/*
+
+-- Read policy
+drop policy if exists "Read own media objects" on storage.objects;
+create policy "Read own media objects" on storage.objects
+for select
+using (
+  bucket_id = 'media'
+  and auth.role() = 'authenticated'
+  and (position(('u/' || auth.uid()) in name) = 1)
+);
+
+-- Insert policy
+drop policy if exists "Insert own media objects" on storage.objects;
+create policy "Insert own media objects" on storage.objects
+for insert
+with check (
+  bucket_id = 'media'
+  and auth.role() = 'authenticated'
+  and (position(('u/' || auth.uid()) in name) = 1)
+);
+
+-- Delete policy
+drop policy if exists "Delete own media objects" on storage.objects;
+create policy "Delete own media objects" on storage.objects
+for delete
+using (
+  bucket_id = 'media'
+  and auth.role() = 'authenticated'
+  and (position(('u/' || auth.uid()) in name) = 1)
+);
 

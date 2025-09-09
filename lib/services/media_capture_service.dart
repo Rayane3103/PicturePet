@@ -21,6 +21,20 @@ class MediaCaptureService {
     if (file == null) return null;
     return await file.readAsBytes();
   }
+
+  Future<XFile?> pickFromGalleryFile() async {
+    return _picker.pickImage(
+      source: ImageSource.gallery,
+      requestFullMetadata: true,
+    );
+  }
+
+  Future<XFile?> captureFromCameraFile() async {
+    return _picker.pickImage(
+      source: ImageSource.camera,
+      requestFullMetadata: true,
+    );
+  }
 }
 
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class OnboardingSplash extends StatefulWidget {
   const OnboardingSplash({super.key});
@@ -41,10 +42,14 @@ class _OnboardingSplashState extends State<OnboardingSplash>
 
     _animationController.forward();
 
-    // Navigate to next screen after 3 seconds
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted) {
-        Navigator.of(context).pushReplacementNamed('/onboarding');
+    // Decide next screen after short splash
+    Future.delayed(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      final session = Supabase.instance.client.auth.currentSession;
+      if (session != null) {
+        Navigator.of(context).pushReplacementNamed('/home');
+      } else {
+        Navigator.of(context).pushReplacementNamed('/auth');
       }
     });
   }

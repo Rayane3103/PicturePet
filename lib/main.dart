@@ -57,6 +57,8 @@ class _MediaUsAppState extends State<MediaUsApp> {
   ThemeMode _mode = ThemeMode.dark; // Default to dark theme
   StreamSubscription? _linkSubscription;
   bool _isMobilePlatform = false;
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  StreamSubscription<AuthState>? _authSubscription;
 
   @override
   void initState() {
@@ -64,12 +66,16 @@ class _MediaUsAppState extends State<MediaUsApp> {
     _checkPlatform();
     _initDeepLinkHandling();
     _initMobileOAuth();
+    _initAuthListener();
+    // Restore any pending uploads
+    UploadQueueService.instance.restoreQueue();
   }
 
   @override
   void dispose() {
     _linkSubscription?.cancel();
     MobileOAuthHandler.dispose();
+    _authSubscription?.cancel();
     super.dispose();
   }
 
@@ -156,6 +162,36 @@ class _MediaUsAppState extends State<MediaUsApp> {
     }
   }
 
+  void _initAuthListener() {
+    _authSubscription = Supabase.instance.client.auth.onAuthStateChange.listen((AuthState data) {
+      final session = data.session;
+      final event = data.event;
+
+      // Navigate on login/logout changes
+      if (session != null) {
+        // Signed in or token refreshed
+        if (event == AuthChangeEvent.signedIn || event == AuthChangeEvent.tokenRefreshed) {
+          final currentRoute = _navigatorKey.currentState?.context.mounted == true
+              ? ModalRoute.of(_navigatorKey.currentState!.context)?.settings.name
+              : null;
+          if (currentRoute != '/home') {
+            _navigatorKey.currentState?.pushNamedAndRemoveUntil('/home', (route) => false);
+          }
+        }
+      } else {
+        // Signed out
+        if (event == AuthChangeEvent.signedOut || event == AuthChangeEvent.userDeleted) {
+          final currentRoute = _navigatorKey.currentState?.context.mounted == true
+              ? ModalRoute.of(_navigatorKey.currentState!.context)?.settings.name
+              : null;
+          if (currentRoute != '/auth') {
+            _navigatorKey.currentState?.pushNamedAndRemoveUntil('/auth', (route) => false);
+          }
+        }
+      }
+    });
+  }
+
   void _setThemeMode(ThemeMode mode) {
     setState(() => _mode = mode);
   }
@@ -165,6 +201,7 @@ class _MediaUsAppState extends State<MediaUsApp> {
     return MaterialApp(
       title: 'MediaPet Mobile',
       debugShowCheckedModeBanner: false,
+      navigatorKey: _navigatorKey,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
       themeMode: _mode,

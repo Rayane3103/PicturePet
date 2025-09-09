@@ -7,7 +7,9 @@ import 'dart:ui';
 import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/media_pipeline_service.dart';
-import '../screens/media_history_page.dart';
+// Removed unused import
+import 'dart:async';
+import '../services/upload_queue_service.dart';
 
 class HomeShell extends StatefulWidget {
   final ThemeMode themeMode;
@@ -22,6 +24,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
   final MediaPipelineService _pipeline = MediaPipelineService();
+  StreamSubscription<Map<String, dynamic>>? _uploadSub;
 
   void _openAddSheet() {
     showModalBottomSheet(
@@ -104,7 +107,9 @@ class _HomeShellState extends State<HomeShell> {
                       ),
                       onTap: () async {
                         Navigator.pop(context);
-                        await _pipeline.pickFromGalleryAndQueue();
+                        final name = await _promptProjectName();
+                        if (name == null) return;
+                        await _pipeline.pickFromGalleryAndQueue(projectName: name);
                       },
                     ),
                     Divider(
@@ -140,7 +145,9 @@ class _HomeShellState extends State<HomeShell> {
                       ),
                       onTap: () async {
                         Navigator.pop(context);
-                        await _pipeline.captureFromCameraAndQueue();
+                        final name = await _promptProjectName();
+                        if (name == null) return;
+                        await _pipeline.captureFromCameraAndQueue(projectName: name);
                       },
                     ),
                   ],
@@ -151,6 +158,45 @@ class _HomeShellState extends State<HomeShell> {
         ),
       ),
     );
+  }
+
+  Future<String?> _promptProjectName() async {
+    String value = '';
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Project name'),
+          content: TextField(
+            autofocus: true,
+            onChanged: (v) => value = v,
+            decoration: const InputDecoration(hintText: 'Enter a name'),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, value.trim().isEmpty ? null : value.trim()), child: const Text('Continue')),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _uploadSub = UploadQueueService.instance.events.listen((event) {
+      if (event['type'] == 'completed' && event['media'] is Map<String, dynamic>) {
+        final media = event['media'] as Map<String, dynamic>;
+        final url = media['url'] as String?;
+        if (url != null && mounted) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => EditorPage(imageAsset: url, projectName: 'Project'),
+            ),
+          );
+        }
+      }
+    });
   }
 
   @override
@@ -194,7 +240,7 @@ class _HomeShellState extends State<HomeShell> {
           style: GoogleFonts.inter(
             color: AppColors.onBackground(context),
             fontWeight: FontWeight.w700,
-            fontSize: 20,
+            fontSize: 26,
           ),
         ),
         centerTitle: true,
@@ -222,9 +268,9 @@ class _HomeShellState extends State<HomeShell> {
                   width: 1,
                 ),
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   _NavItem(
                     icon: Icons.collections_bookmark_outlined,
@@ -250,6 +296,12 @@ class _HomeShellState extends State<HomeShell> {
         ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _uploadSub?.cancel();
+    super.dispose();
   }
 }
 
@@ -277,21 +329,21 @@ class _NavItem extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
           color: backgroundColor,
           borderRadius: BorderRadius.circular(16),
         ),
         child: Row(
           children: [
-            Icon(selected ? activeIcon : icon, color: color, size: 20),
+            Icon(selected ? activeIcon : icon, color: color, size: 18),
             const SizedBox(width: 8),
             Text(
               label,
               style: GoogleFonts.inter(
                 color: color,
                 fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                fontSize: 14,
+                fontSize: 12,
               ),
             ),
           ],
@@ -319,7 +371,7 @@ class _AddButton extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(20),
           child: const Padding(
-            padding: EdgeInsets.all(16),
+            padding: EdgeInsets.all(14),
             child: Icon(Icons.add, color: Colors.white, size: 24),
           ),
         ),

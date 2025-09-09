@@ -76,18 +76,14 @@ class CropRotateView extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
-            // Rotate left button
             _buildRotationButton(
               context: context,
               icon: Icons.rotate_left_rounded,
               onTap: () {
-                tool.rotationAngle -= 90;
-                if (tool.rotationAngle < 0) tool.rotationAngle += 360;
-                onStateChanged(); // Trigger state update in parent
+                tool.rotateLeft90();
+                onStateChanged();
               },
             ),
-            
-            // Rotation angle display
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
@@ -95,7 +91,7 @@ class CropRotateView extends StatelessWidget {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                '${tool.rotationAngle.round()}°',
+                '${tool.getCurrentRotation().round()}°',
                 style: GoogleFonts.inter(
                   color: AppColors.onBackground(context),
                   fontWeight: FontWeight.w600,
@@ -103,15 +99,64 @@ class CropRotateView extends StatelessWidget {
                 ),
               ),
             ),
-            
-            // Rotate right button
             _buildRotationButton(
               context: context,
               icon: Icons.rotate_right_rounded,
               onTap: () {
-                tool.rotationAngle += 90;
-                if (tool.rotationAngle >= 360) tool.rotationAngle -= 360;
-                onStateChanged(); // Trigger state update in parent
+                tool.rotateRight90();
+                onStateChanged();
+              },
+            ),
+          ],
+        ),
+
+        const SizedBox(height: 12),
+        // Continuous rotation slider
+        Row(
+          children: [
+            Expanded(
+              child: Slider(
+                min: -45,
+                max: 45,
+                value: _clampAngle(tool.getCurrentRotation(), -45, 45),
+                onChanged: (v) {
+                  tool.setRotationDegrees(v);
+                  onStateChanged();
+                },
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text('${_clampAngle(tool.getCurrentRotation(), -45, 45).toStringAsFixed(0)}°',
+              style: GoogleFonts.inter(
+                color: AppColors.onBackground(context),
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+
+        const SizedBox(height: 8),
+        // Grid toggle and reset
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _buildSmallButton(
+              context: context,
+              icon: tool.isGridVisible ? Icons.grid_on_rounded : Icons.grid_off_rounded,
+              label: tool.isGridVisible ? 'Grid On' : 'Grid Off',
+              onTap: () {
+                tool.toggleGrid();
+                onStateChanged();
+              },
+            ),
+            _buildSmallButton(
+              context: context,
+              icon: Icons.restore_rounded,
+              label: 'Reset',
+              onTap: () {
+                tool.reset();
+                onStateChanged();
               },
             ),
           ],
@@ -142,6 +187,49 @@ class CropRotateView extends StatelessWidget {
           icon,
           color: AppColors.onBackground(context),
           size: 20,
+        ),
+      ),
+    );
+  }
+
+  double _clampAngle(double value, double min, double max) {
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+  }
+
+  Widget _buildSmallButton({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: AppColors.muted(context),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: AppColors.muted(context).withOpacity(0.5),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: AppColors.onBackground(context), size: 16),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: GoogleFonts.inter(
+                color: AppColors.onBackground(context),
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ],
         ),
       ),
     );

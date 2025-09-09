@@ -42,7 +42,18 @@ class ProjectCard extends StatelessWidget {
         AspectRatio(
           aspectRatio: 1,
           child: imageAsset.startsWith('http')
-              ? Image.network(imageAsset, fit: BoxFit.cover)
+              ? Image.network(
+                  imageAsset,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      color: AppColors.muted(context),
+                      child: const Center(
+                        child: Icon(Icons.image_not_supported_outlined, color: Colors.white70),
+                      ),
+                    );
+                  },
+                )
               : Image.asset(imageAsset, fit: BoxFit.cover),
         ),
         Positioned(

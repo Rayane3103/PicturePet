@@ -30,11 +30,12 @@ class AppDrawer extends StatelessWidget {
         ),
       ),
       child: SafeArea(
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _Header(themeMode: themeMode),
-            const SizedBox(height: 24),
+            const SizedBox(height: 15),
             
             // Navigation items
             Padding(
@@ -47,7 +48,7 @@ class AppDrawer extends StatelessWidget {
                     onTap: onGoLibrary,
                     isActive: true,
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   _DrawerTile(
                     icon: Icons.photo_library_outlined,
                     label: 'My Uploads',
@@ -56,13 +57,13 @@ class AppDrawer extends StatelessWidget {
                       Navigator.of(context).pushNamed('/media');
                     },
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   _DrawerTile(
                     icon: Icons.settings_outlined,
                     label: 'Settings',
                     onTap: () {},
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   _DrawerTile(
                     icon: Icons.contact_support_rounded,
                     label: 'Contact Us',
@@ -72,9 +73,9 @@ class AppDrawer extends StatelessWidget {
               ),
             ),
             
-            const SizedBox(height: 24),
+            const SizedBox(height: 10),
              Divider(color: AppColors.muted(context), height: 1),
-            const SizedBox(height: 24),
+            const SizedBox(height: 10),
             
             // Appearance section
             Padding(
@@ -100,9 +101,9 @@ class AppDrawer extends StatelessWidget {
               ),
             ),
             
-            const SizedBox(height: 24),
+            const SizedBox(height: 10),
             Divider(color: AppColors.muted(context), height: 1),
-            const SizedBox(height: 24),
+            const SizedBox(height: 10),
             
             // Account section
             Padding(
@@ -129,7 +130,7 @@ class AppDrawer extends StatelessWidget {
               ),
             ),
             
-            const Spacer(),
+            const SizedBox(height: 8),
             
             // Footer
             Container(
@@ -198,6 +199,7 @@ class AppDrawer extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -311,8 +313,8 @@ class _Header extends StatelessWidget {
                 ),
                 child: Image.asset(
                   'assets/images/logo.png',
-                  width: 60,
-                  height: 60,
+                  width: 80,
+                  height: 80,
                   fit: BoxFit.contain,
                 ),
               ),

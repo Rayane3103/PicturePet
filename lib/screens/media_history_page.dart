@@ -72,7 +72,24 @@ class _MediaHistoryPageState extends State<MediaHistoryPage> {
               leading: item.thumbnailUrl != null
                   ? ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: Image.network(item.thumbnailUrl!, width: 56, height: 56, fit: BoxFit.cover),
+                      child: Image.network(
+                        item.thumbnailUrl!,
+                        width: 56,
+                        height: 56,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            width: 56,
+                            height: 56,
+                            color: AppColors.muted(context),
+                            child: Icon(
+                              Icons.wifi_off_rounded,
+                              color: AppColors.secondaryText(context),
+                              size: 20,
+                            ),
+                          );
+                        },
+                      ),
                     )
                   : const Icon(Icons.image, size: 32),
               title: Text(

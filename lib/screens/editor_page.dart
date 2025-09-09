@@ -154,7 +154,17 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       ),
       child: IconButton(
         icon: Icon(icon, color: AppColors.onBackground(context), size: 20),
-        onPressed: () {},
+        onPressed: () {
+          if (_cropRotateTool.showCropRotateView) {
+            setState(() {
+              if (tooltip == 'Undo') {
+                _cropRotateTool.undo();
+              } else if (tooltip == 'Redo') {
+                _cropRotateTool.redo();
+              }
+            });
+          }
+        },
         tooltip: tooltip,
       ),
     );
@@ -366,7 +376,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     Widget imageWidget = widget.imageAsset.startsWith('http')
         ? Image.network(
             widget.imageAsset,
-            fit: BoxFit.contain,
+            //fit: BoxFit.cover,
             width: 400,
             height: 400,
             loadingBuilder: (context, child, loadingProgress) {
@@ -391,10 +401,27 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 ),
               );
             },
+            errorBuilder: (context, error, stackTrace) {
+              return Container(
+                width: 300,
+                height: 300,
+                decoration: BoxDecoration(
+                  color: AppColors.muted(context),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Center(
+                  child: Icon(
+                    Icons.wifi_off_rounded,
+                    color: AppColors.secondaryText(context),
+                    size: 36,
+                  ),
+                ),
+              );
+            },
           )
         : Image.asset(
             widget.imageAsset,
-            fit: BoxFit.contain,
+            fit: BoxFit.cover,
             width: 400,
             height: 400,
           );
@@ -408,13 +435,15 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       );
     }
 
-    // Apply rotation using tool
-    double currentRotation = _cropRotateTool.getCurrentRotation();
-    if (currentRotation != 0) {
-      imageWidget = Transform.rotate(
-        angle: currentRotation * (3.14159 / 180), // Convert degrees to radians
-        child: imageWidget,
-      );
+    // Apply rotation only when NOT in crop mode to keep overlay math aligned
+    if (!_cropRotateTool.showCropRotateView) {
+      double currentRotation = _cropRotateTool.getCurrentRotation();
+      if (currentRotation != 0) {
+        imageWidget = Transform.rotate(
+          angle: currentRotation * (3.14159 / 180), // Convert degrees to radians
+          child: imageWidget,
+        );
+      }
     }
 
     Widget imageContainer = Container(
@@ -456,7 +485,10 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 _cropRotateTool.handleCropPanStart(details);
               },
               child: CustomPaint(
-                painter: CropOverlayPainter(_cropRotateTool.cropArea),
+                painter: CropOverlayPainter(
+                  _cropRotateTool.cropArea,
+                  showGrid: _cropRotateTool.isGridVisible,
+                ),
               ),
             ),
           ),
@@ -645,20 +677,39 @@ Widget _aiTools(BuildContext context) {
       return Center(child: imageWidget);
     }
     
-    // Apply actual crop using ClipRect with proper centering
-    return SizedBox(
-      width: 400,
-      height: 400,
+    // Crop using Align widthFactor/heightFactor and then scale to canvas
+    const double canvasSize = 400;
+    final double centerX = appliedCropArea.left + appliedCropArea.width / 2;
+    final double centerY = appliedCropArea.top + appliedCropArea.height / 2;
+    final Alignment alignment = Alignment(
+      (centerX - 0.5) * 2.0,
+      (centerY - 0.5) * 2.0,
+    );
+
+    final Widget cropped = SizedBox(
+      width: canvasSize,
+      height: canvasSize,
       child: ClipRect(
         child: Align(
-          alignment: Alignment.center,
-          child: Transform.translate(
-            offset: Offset(
-              -appliedCropArea.left * 400, // Move image to show crop area
-              -appliedCropArea.top * 400,  // Move image to show crop area
-            ),
-            child: imageWidget, // Keep original size - no scaling
+          alignment: alignment,
+          widthFactor: appliedCropArea.width,
+          heightFactor: appliedCropArea.height,
+          child: SizedBox(
+            width: canvasSize,
+            height: canvasSize,
+            child: imageWidget,
           ),
+        ),
+      ),
+    );
+
+    return SizedBox(
+      width: canvasSize,
+      height: canvasSize,
+      child: Center(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: cropped,
         ),
       ),
     );

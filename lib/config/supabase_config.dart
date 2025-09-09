@@ -1,3 +1,5 @@
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
 class SupabaseConfig {
   // Prefer compile-time injection via --dart-define, fallback to .env via flutter_dotenv
   static const String _envUrlDefine = String.fromEnvironment('SUPABASE_URL', defaultValue: '');
@@ -20,9 +22,20 @@ class SupabaseConfig {
     }
   }
 
-  // Fallbacks (keep for local dev only). Do NOT use in production.
-  static const String _fallbackUrl = 'https://kjpycujguhmsvrcrznrw.supabase.co';
-  static const String _fallbackAnon = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtqcHljdWpndWhtc3ZyY3J6bnJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYyMjU2NzEsImV4cCI6MjA3MTgwMTY3MX0.iNhc3fihLlXpqn5c63niaPVAQMvWyooK1hibOm2-h6U';
+  // Optional redirect URL from env
+  static const String _envRedirectDefine = String.fromEnvironment('SUPABASE_REDIRECT_URL', defaultValue: '');
+  static String get _envRedirectDotenv {
+    try {
+      // ignore: avoid_dynamic_calls
+      return (dotenv.env['SUPABASE_REDIRECT_URL'] ?? '').toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // Fallbacks removed; values must come from --dart-define or .env
+  static const String _fallbackUrl = '';
+  static const String _fallbackAnon = '';
 
   // Public getters used by the app
   static String get url {
@@ -36,8 +49,13 @@ class SupabaseConfig {
     return _fallbackAnon;
   }
 
-  // OAuth redirect URLs - Use web URLs that Google/Facebook accept
-  static const String oauthRedirectUrl = 'https://kjpycujguhmsvrcrznrw.supabase.co/auth/v1/callback';
+  // OAuth redirect URL (prefers env; falls back to derived from SUPABASE_URL)
+  static String get oauthRedirectUrl {
+    if (_envRedirectDefine.isNotEmpty) return _envRedirectDefine;
+    if (_envRedirectDotenv.isNotEmpty) return _envRedirectDotenv;
+    if (url.isNotEmpty) return '$url/auth/v1/callback';
+    return '';
+  }
 
   // Mobile app deep link scheme for handling OAuth completion
   static const String mobileAppScheme = 'io.supabase.flutter';
@@ -66,6 +84,7 @@ class SupabaseConfig {
     return {
       'SUPABASE_URL': _envUrlDefine.isNotEmpty || _envUrlDotenv.isNotEmpty,
       'SUPABASE_ANON_KEY': _envAnonDefine.isNotEmpty || _envAnonDotenv.isNotEmpty,
+      'SUPABASE_REDIRECT_URL': _envRedirectDefine.isNotEmpty || _envRedirectDotenv.isNotEmpty,
       'ANALYTICS_API_KEY': analyticsApiKey.isNotEmpty,
       'SENTRY_DSN': sentryDsn.isNotEmpty,
     };
