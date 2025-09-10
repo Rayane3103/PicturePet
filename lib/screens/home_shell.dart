@@ -212,7 +212,7 @@ class _HomeShellState extends State<HomeShell> {
           );
         },
       ),
-      const SizedBox.shrink(),
+      const  SizedBox.shrink(),
       ProfilePage(
         themeMode: widget.themeMode,
         onModeChanged: widget.onThemeModeChanged,

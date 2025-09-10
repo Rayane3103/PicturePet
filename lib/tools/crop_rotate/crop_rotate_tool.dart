@@ -47,7 +47,17 @@ class CropRotateTool {
   }
 
   void applyCropAndRotate() {
-    _applied = _current;
+    // After committing edits to bytes, reset baseline to full image to avoid double-cropping/rotation in preview
+    _applied = TransformState.initial().copyWith(
+      cropRect: const Rect.fromLTWH(0.0, 0.0, 1.0, 1.0),
+      rotationRadians: 0.0,
+      exifOrientation: _current.exifOrientation,
+      isGridVisible: _current.isGridVisible,
+    );
+    _current = _applied;
+    _undoStack.clear();
+    _redoStack.clear();
+    _pushHistory(_current);
     showCropRotateView = false;
   }
 

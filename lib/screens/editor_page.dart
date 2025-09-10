@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'dart:ui';
 import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../tools/tools.dart';
+import 'dart:typed_data';
+import 'package:flutter/services.dart';
+import 'package:pro_image_editor/pro_image_editor.dart';
+import 'package:image/image.dart' as img;
 
 class EditorPage extends StatefulWidget {
   final String imageAsset;
@@ -16,16 +19,49 @@ class EditorPage extends StatefulWidget {
 
 class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateMixin {
   late final TabController _tabController = TabController(length: 2, vsync: this);
-  
-  // Tools
-  final CropRotateTool _cropRotateTool = CropRotateTool();
-  final FiltersTool _filtersTool = FiltersTool();
-  final AIStylesTool _aiStylesTool = AIStylesTool();
+
+  Uint8List? _imageBytes;
+  bool _loading = true;
 
   @override
   void initState() {
     super.initState();
     _tabController.addListener(() => setState(() {}));
+    _loadAndDownscaleImage();
+  }
+
+  Future<void> _loadAndDownscaleImage() async {
+    try {
+      Uint8List raw;
+      if (widget.imageAsset.startsWith('http')) {
+        final data = await NetworkAssetBundle(Uri.parse(widget.imageAsset)).load(widget.imageAsset);
+        raw = data.buffer.asUint8List();
+      } else {
+        final data = await rootBundle.load(widget.imageAsset);
+        raw = data.buffer.asUint8List();
+      }
+      // Downscale if too large
+      final img.Image? decoded = img.decodeImage(raw);
+      if (decoded != null) {
+        const int maxSide = 2048;
+        final int w = decoded.width;
+        final int h = decoded.height;
+        if (w > maxSide || h > maxSide) {
+          final resized = img.copyResize(decoded, width: w > h ? maxSide : null, height: h >= w ? maxSide : null);
+          raw = img.encodeJpg(resized, quality: 90);
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _imageBytes = raw;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+      });
+    }
   }
 
   @override
@@ -37,705 +73,303 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      extendBodyBehindAppBar: true,
       backgroundColor: AppColors.background(context),
-      appBar: _buildAppBar(),
       body: Stack(
         children: [
-          // Top gradient overlay for better text readability
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 120,
-            child: IgnorePointer(
-              child: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      AppColors.background(context).withOpacity(0.9),
-                      AppColors.background(context).withOpacity(0.0),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          
-          // Main image canvas
           Positioned.fill(
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 120),
-              child: Center(
-                child: Hero(
-                  tag: widget.imageAsset,
-                  child: _buildImage(),
-                ),
-              ),
-            ),
+            child: _buildImage(),
           ),
-          
-          // Bottom control panel
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: SafeArea(
-              minimum: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
-              child: _buildControlPanel(),
-            ),
-          ),
+          _buildAiSideOverlay(),
         ],
       ),
+      bottomNavigationBar: SafeArea(
+        minimum: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
+        child: _buildBottomTabs(),
+      ),
     );
   }
 
-  PreferredSizeWidget _buildAppBar() {
-    return AppBar(
-      backgroundColor: Colors.transparent,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      leading: Container(
-        margin: const EdgeInsets.only(left: 8),
-        decoration: BoxDecoration(
-          color: AppColors.card(context).withOpacity(0.9),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: IconButton(
-          icon: Icon(
-            Icons.arrow_back_ios_new_rounded,
-            color: AppColors.onBackground(context),
-            size: 20,
-          ),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-      ),
-      title: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: AppColors.card(context).withOpacity(0.9),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          widget.projectName,
-          style: GoogleFonts.inter(
-            color: AppColors.onBackground(context),
-            fontWeight: FontWeight.w600,
-            fontSize: 16,
-          ),
-        ),
-      ),
-      centerTitle: true,
-      actions: [
-        _buildActionButton(Icons.undo_rounded, 'Undo'),
-        _buildActionButton(Icons.redo_rounded, 'Redo'),
-        const SizedBox(width: 8),
-        Container(
-          margin: const EdgeInsets.only(right: 8),
-          decoration: BoxDecoration(
-            gradient: AppGradients.primary,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: IconButton(
-            icon: const Icon(Icons.check_rounded, color: Colors.white, size: 20),
-            onPressed: () {},
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildActionButton(IconData icon, String tooltip) {
+  Widget _buildBottomTabs() {
     return Container(
-      margin: const EdgeInsets.only(right: 4),
       decoration: BoxDecoration(
-        color: AppColors.card(context).withOpacity(0.9),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: IconButton(
-        icon: Icon(icon, color: AppColors.onBackground(context), size: 20),
-        onPressed: () {
-          if (_cropRotateTool.showCropRotateView) {
-            setState(() {
-              if (tooltip == 'Undo') {
-                _cropRotateTool.undo();
-              } else if (tooltip == 'Redo') {
-                _cropRotateTool.redo();
-              }
-            });
-          }
-        },
-        tooltip: tooltip,
-      ),
-    );
-  }
-
- Widget _buildControlPanel() {
-  return Container(
-    margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-    decoration: BoxDecoration(
-      color: AppColors.card(context).withOpacity(0.85),
-      borderRadius: BorderRadius.circular(28),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black.withOpacity(0.08),
-          blurRadius: 20,
-          offset: const Offset(0, 8),
+        color: AppColors.card(context).withOpacity(0.85),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+        border: Border.all(
+          color: AppColors.muted(context).withOpacity(0.25),
+          width: 1,
         ),
-      ],
-      border: Border.all(
-        color: AppColors.muted(context).withOpacity(0.25),
-        width: 1,
       ),
-    ),
-    child: ClipRRect(
-      borderRadius: BorderRadius.circular(28),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Header with back button when in filters, crop, or AI styles view
-              if (_filtersTool.showFiltersView || _cropRotateTool.showCropRotateView || _aiStylesTool.showStylesView) ...[
-                Row(
-                  children: [
-                    Container(
-                      decoration: BoxDecoration(
-                        color: AppColors.muted(context).withOpacity(0.6),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: IconButton(
-                        icon: Icon(
-                          Icons.arrow_back_ios_new_rounded,
-                          color: AppColors.onBackground(context),
-                          size: 20,
-                        ),
-                        onPressed: () {
-                          setState(() {
-                            if (_filtersTool.showFiltersView) {
-                              _filtersTool.backFromFiltersView();
-                            } else if (_aiStylesTool.showStylesView) {
-                              _aiStylesTool.backFromStylesView();
-                            } else if (_cropRotateTool.showCropRotateView) {
-                              _cropRotateTool.backFromCropView();
-                            }
-                          });
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      _filtersTool.showFiltersView
-                          ? 'Filters'
-                          : _aiStylesTool.showStylesView
-                              ? 'AI Styles'
-                              : 'Crop & Rotate',
-                      style: GoogleFonts.inter(
-                        color: AppColors.onBackground(context),
-                        fontWeight: FontWeight.w700,
-                        fontSize: 18,
-                      ),
-                    ),
-                    const Spacer(),
-                    if (_cropRotateTool.showCropRotateView) ...[
-                      Container(
-                        decoration: BoxDecoration(
-                          gradient: AppGradients.primary,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: IconButton(
-                          icon: const Icon(
-                            Icons.check_rounded,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                          onPressed: () {
-                            setState(() {
-                              _cropRotateTool.applyCropAndRotate();
-                            });
-                            _showCropAppliedMessage();
-                          },
-                        ),
-                      ),
-                    ],
-                  ],
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Container(
+          decoration: BoxDecoration(
+            color: AppColors.muted(context).withOpacity(0.6),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: TabBar(
+            controller: _tabController,
+            labelColor: Colors.white,
+            unselectedLabelColor: AppColors.secondaryText(context),
+            indicator: BoxDecoration(
+              gradient: AppGradients.primary,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.primaryPurple.withOpacity(0.4),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
                 ),
-                const SizedBox(height: 16),
-              ] else ...[
-                // Tab bar
-                Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: AppColors.muted(context).withOpacity(0.6),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: TabBar(
-                  controller: _tabController,
-                  labelColor: Colors.white,
-                  unselectedLabelColor: AppColors.secondaryText(context),
-                  indicator: BoxDecoration(
-                    gradient: AppGradients.primary,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.primaryPurple.withOpacity(0.4),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  labelStyle: GoogleFonts.inter(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14,
-                  ),
-                  unselectedLabelStyle: GoogleFonts.inter(
-                    fontWeight: FontWeight.w500,
-                    fontSize: 14,
-                  ),
-                  indicatorSize: TabBarIndicatorSize.tab,
-                  tabs: const [
-                    Tab(text: 'Manual'),
-                    Tab(text: 'AI'),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
               ],
-
-              // Fixed height for both tabs to avoid unbounded height error
-              SizedBox(
-                height: 130, // same height for both tabs
-                child: _filtersTool.showFiltersView 
-                  ? FiltersView(
-                      tool: _filtersTool,
-                      onBack: () {
-                        setState(() {
-                          _filtersTool.backFromFiltersView();
-                        });
-                      },
-                      onStateChanged: () {
-                        setState(() {
-                          // Trigger rebuild when tool state changes
-                        });
-                      },
-                    )
-                  : _aiStylesTool.showStylesView
-                    ? AIStylesView(
-                        tool: _aiStylesTool,
-                        onBack: () {
-                          setState(() {
-                            _aiStylesTool.backFromStylesView();
-                          });
-                        },
-                        onStateChanged: () {
-                          setState(() {
-                            // Trigger rebuild when tool state changes
-                          });
-                        },
-                      )
-                  : _cropRotateTool.showCropRotateView
-                    ? CropRotateView(
-                        tool: _cropRotateTool,
-                        onBack: () {
-                          setState(() {
-                            _cropRotateTool.backFromCropView();
-                          });
-                        },
-                        onApply: () {
-                          setState(() {
-                            _cropRotateTool.applyCropAndRotate();
-                          });
-                          _showCropAppliedMessage();
-                        },
-                        onStateChanged: () {
-                          setState(() {
-                            // Trigger rebuild when tool state changes
-                          });
-                        },
-                      )
-                    : TabBarView(
-                        controller: _tabController,
-                        children: [
-                          _manualTools(context),
-                          _aiTools(context),
-                        ],
-                      ),
-              ),
+            ),
+            labelStyle: GoogleFonts.inter(
+              fontWeight: FontWeight.w700,
+              fontSize: 14,
+            ),
+            unselectedLabelStyle: GoogleFonts.inter(
+              fontWeight: FontWeight.w500,
+              fontSize: 14,
+            ),
+            indicatorSize: TabBarIndicatorSize.tab,
+            tabs: const [
+              Tab(text: 'Manual'),
+              Tab(text: 'AI'),
             ],
           ),
         ),
       ),
-    ),
-  );
-}
-
-
-  Widget _buildImage() {
-    Widget imageWidget = widget.imageAsset.startsWith('http')
-        ? Image.network(
-            widget.imageAsset,
-            //fit: BoxFit.cover,
-            width: 400,
-            height: 400,
-            loadingBuilder: (context, child, loadingProgress) {
-              if (loadingProgress == null) {
-                return child;
-              }
-              return Container(
-                width: 300,
-                height: 300,
-                decoration: BoxDecoration(
-                  color: AppColors.muted(context),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Center(
-                  child: CircularProgressIndicator(
-                    value: loadingProgress.expectedTotalBytes != null
-                        ? loadingProgress.cumulativeBytesLoaded /
-                            loadingProgress.expectedTotalBytes!
-                        : null,
-                    color: AppColors.primaryPurple,
-                  ),
-                ),
-              );
-            },
-            errorBuilder: (context, error, stackTrace) {
-              return Container(
-                width: 300,
-                height: 300,
-                decoration: BoxDecoration(
-                  color: AppColors.muted(context),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Center(
-                  child: Icon(
-                    Icons.wifi_off_rounded,
-                    color: AppColors.secondaryText(context),
-                    size: 36,
-                  ),
-                ),
-              );
-            },
-          )
-        : Image.asset(
-            widget.imageAsset,
-            fit: BoxFit.cover,
-            width: 400,
-            height: 400,
-          );
-
-    // Apply filter if one is selected
-    final colorFilter = _filtersTool.getSelectedColorFilter();
-    if (colorFilter != null) {
-      imageWidget = ColorFiltered(
-        colorFilter: colorFilter,
-        child: imageWidget,
-      );
-    }
-
-    // Apply rotation only when NOT in crop mode to keep overlay math aligned
-    if (!_cropRotateTool.showCropRotateView) {
-      double currentRotation = _cropRotateTool.getCurrentRotation();
-      if (currentRotation != 0) {
-        imageWidget = Transform.rotate(
-          angle: currentRotation * (3.14159 / 180), // Convert degrees to radians
-          child: imageWidget,
-        );
-      }
-    }
-
-    Widget imageContainer = Container(
-      constraints: const BoxConstraints(
-        maxWidth: 400,
-        maxHeight: 400,
-      ),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          // BoxShadow(
-          //   color: Colors.black.withOpacity(0.1),
-          //   blurRadius: 6,
-          //   spreadRadius: 0,
-          //   offset: const Offset(0, 2),
-          // ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: _buildImageWithCrop(imageWidget),
-      ),
     );
-
-    // Add crop overlay if in crop mode
-    if (_cropRotateTool.showCropRotateView) {
-      imageContainer = Stack(
-        children: [
-          imageContainer,
-          // Interactive crop overlay
-          Positioned.fill(
-            child: GestureDetector(
-              onPanUpdate: (details) {
-                setState(() {
-                  _cropRotateTool.handleCropPanUpdate(details);
-                });
-              },
-              onPanStart: (details) {
-                _cropRotateTool.handleCropPanStart(details);
-              },
-              child: CustomPaint(
-                painter: CropOverlayPainter(
-                  _cropRotateTool.cropArea,
-                  showGrid: _cropRotateTool.isGridVisible,
-                ),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    return imageContainer;
   }
 
-  Widget _manualTools(BuildContext context) {
-  final tools = [
-    (Icons.crop_rotate_rounded, 'Crop & Rotate', AppColors.primaryPurple),
-    (Icons.filter_vintage_rounded, 'Filters', AppColors.accentPurple),
-    (Icons.brightness_6_rounded, 'Adjust', AppColors.primaryBlue),
-    (Icons.text_fields_rounded, 'Add Text', AppColors.accentBlue),
-  ];
-
-  return Row(
-    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-    children: tools.map((tool) {
-      return _buildToolButton(
-        icon: tool.$1,
-        label: tool.$2,
-        color: tool.$3,
+  Widget _buildImage() {
+    if (_loading) {
+      return const SizedBox(
+        width: 200,
+        height: 200,
+        child: Center(child: CircularProgressIndicator()),
       );
-    }).toList(),
-  );
-}
-
-Widget _aiTools(BuildContext context) {
-  final items = [
-    ('ai-styles', Icons.palette_rounded, 'AI Styles'),
-    ('fal-ai/ideogram/v3/edit', Icons.auto_fix_high_rounded, 'Ideogram Edit'),
-    ('fal-ai/ideogram/character/edit', Icons.portrait_rounded, 'Character Edit'),
-    ('fal-ai/ideogram/v3/reframe', Icons.crop_16_9_rounded, 'Reframe'),
-    ('fal-ai/qwen-image-edit', Icons.image_rounded, 'Qwen Edit'),
-  ];
-
-  return SizedBox(
-    height: 120, // fixes unbounded height
-    child: ListView.separated(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      itemBuilder: (context, i) {
-        final item = items[i];
-        final isAIStyles = item.$1 == 'ai-styles';
-        return Container(
-          width: 140,
-          decoration: BoxDecoration(
-            color: AppColors.muted(context),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: AppColors.muted(context).withOpacity(0.5),
-              width: 1,
+    }
+    if (_imageBytes == null) {
+      return const Text('Failed to load image');
+    }
+    return Theme(
+      data: _editorTheme(context),
+      child: ProImageEditor.memory(
+        _imageBytes!,
+        configs: ProImageEditorConfigs(
+          theme: _editorTheme(context),
+          mainEditor: MainEditorConfigs(
+            style: MainEditorStyle(
+              bottomBarBackground: AppColors.background(context),
+              bottomBarColor: AppColors.onBackground(context),
+              background: AppColors.background(context),
+              appBarBackground: AppColors.card(context),
+              appBarColor: AppColors.onCard(context),
             ),
           ),
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () {
-                if (isAIStyles) {
-                  setState(() {
-                    _aiStylesTool.showStyles();
-                  });
-                }
-              },
-              borderRadius: BorderRadius.circular(16),
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        gradient: AppGradients.primary,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        item.$2,
-                        color: Colors.white,
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      item.$3,
-                      style: GoogleFonts.inter(
-                        color: AppColors.onBackground(context),
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-      separatorBuilder: (_, __) => const SizedBox(width: 12),
-      itemCount: items.length,
-    ),
-  );
-}
+        ),
+        callbacks: ProImageEditorCallbacks(
+          onImageEditingComplete: (Uint8List bytes) async {
+            Navigator.pop(context, bytes);
+          },
+        ),
+      ),
+    );
+  }
 
-  Widget _buildToolButton({
-    required IconData icon,
-    required String label,
-    required Color color,
-  }) {
-    return GestureDetector(
-      onTap: () {
-        if (label == 'Filters') {
-          setState(() {
-            _filtersTool.showFilters();
-          });
-        } else if (label == 'Crop & Rotate') {
-          setState(() {
-            _cropRotateTool.showCropRotateView = true;
-            _cropRotateTool.initializeCropView();
-          });
-        }
-        // Handle other tools here
-      },
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 56,
-            height: 56,
+  Widget _buildAiSideOverlay() {
+    final bool show = _tabController.index == 1;
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      top: 0,
+      bottom: 0,
+      right: show ? 0 : -320,
+      width: 320,
+      child: SafeArea(
+        minimum: const EdgeInsets.only(top: 16, right: 16, bottom: 90),
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: Container(
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [color, color.withOpacity(0.8)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+              color: AppColors.card(context).withOpacity(0.95),
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                  color: color.withOpacity(0.3),
-                  blurRadius: 12,
-                  spreadRadius: 0,
-                  offset: const Offset(0, 4),
+                  color: Colors.black.withOpacity(0.12),
+                  blurRadius: 24,
+                  offset: const Offset(0, 10),
                 ),
               ],
+              border: Border.all(
+                color: AppColors.muted(context).withOpacity(0.25),
+                width: 1,
+              ),
             ),
-            child: Icon(
-              icon,
-              color: Colors.white,
-              size: 24,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            label,
-            style: GoogleFonts.inter(
-              color: AppColors.onBackground(context),
-              fontWeight: FontWeight.w500,
-              fontSize: 12,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  }
-
-
-
-  Widget _buildImageWithCrop(Widget imageWidget) {
-    // If in crop mode, show original image (cropping is handled by overlay)
-    if (_cropRotateTool.showCropRotateView) {
-      return Center(child: imageWidget);
-    }
-    
-    // If not in crop mode, apply the actual crop
-    Rect appliedCropArea = _cropRotateTool.appliedCropArea;
-    
-    // If crop area is the default (no cropping), return original image centered
-    if (appliedCropArea == const Rect.fromLTWH(0.1, 0.1, 0.8, 0.8)) {
-      return Center(child: imageWidget);
-    }
-    
-    // Crop using Align widthFactor/heightFactor and then scale to canvas
-    const double canvasSize = 400;
-    final double centerX = appliedCropArea.left + appliedCropArea.width / 2;
-    final double centerY = appliedCropArea.top + appliedCropArea.height / 2;
-    final Alignment alignment = Alignment(
-      (centerX - 0.5) * 2.0,
-      (centerY - 0.5) * 2.0,
-    );
-
-    final Widget cropped = SizedBox(
-      width: canvasSize,
-      height: canvasSize,
-      child: ClipRect(
-        child: Align(
-          alignment: alignment,
-          widthFactor: appliedCropArea.width,
-          heightFactor: appliedCropArea.height,
-          child: SizedBox(
-            width: canvasSize,
-            height: canvasSize,
-            child: imageWidget,
+            child: _buildAiPanelContent(),
           ),
         ),
       ),
     );
+  }
 
+  Widget _buildAiPanelContent() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            gradient: AppGradients.primary,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.auto_awesome, color: Colors.white, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                'AI Tools',
+                style: GoogleFonts.inter(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: ListView(
+              children: [
+                _aiActionButton(Icons.remove_circle_outline, 'Remove background'),
+                const SizedBox(height: 10),
+                _aiActionButton(Icons.brush_outlined, 'Magic eraser'),
+                const SizedBox(height: 10),
+                _aiActionButton(Icons.auto_fix_high_rounded, 'AI Style transformation'),
+                const SizedBox(height: 10),
+                _aiActionButton(Icons.auto_fix_high_rounded, 'ideogram/v3/edit'),
+                const SizedBox(height: 10),
+                _aiActionButton(Icons.person_rounded, 'ideogram/character_edit'),
+                const SizedBox(height: 10),
+                _aiActionButton(Icons.autorenew_rounded, 'ideogram/v3/reframe'),
+                const SizedBox(height: 10),
+                _aiActionButton(Icons.bolt_rounded, 'nano-banana'),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _aiActionButton(IconData icon, String label) {
     return SizedBox(
-      width: canvasSize,
-      height: canvasSize,
-      child: Center(
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: cropped,
+      height: 44,
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppColors.card(context),
+          foregroundColor: AppColors.onBackground(context),
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+        onPressed: () {
+          // TODO: hook into your AI actions
+        },
+        icon: Icon(icon, size: 18),
+        label: Text(
+          label,
+          style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13),
         ),
       ),
     );
   }
 
-  void _showCropAppliedMessage() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Crop & Rotate applied successfully!',
-          style: GoogleFonts.inter(
-            color: Colors.white,
-            fontWeight: FontWeight.w500,
-          ),
+  ThemeData _editorTheme(BuildContext context) {
+    final ThemeData base = Theme.of(context);
+    final bool isDark = base.brightness == Brightness.dark;
+
+    final ColorScheme scheme = base.colorScheme.copyWith(
+      primary: AppColors.primaryPurple,
+      secondary: AppColors.primaryBlue,
+      surface: AppColors.surface(context),
+      onSurface: AppColors.onSurface(context),
+      background: AppColors.background(context),
+      onBackground: AppColors.onBackground(context),
+    );
+
+    return base.copyWith(
+      colorScheme: scheme,
+      scaffoldBackgroundColor: AppColors.background(context),
+      cardColor: AppColors.card(context),
+      appBarTheme: AppBarTheme(
+        elevation: 0,
+        backgroundColor: AppColors.card(context).withOpacity(isDark ? 0.9 : 0.95),
+        foregroundColor: AppColors.onCard(context),
+        surfaceTintColor: Colors.transparent,
+        titleTextStyle: GoogleFonts.inter(
+          fontSize: 16,
+          fontWeight: FontWeight.w700,
+          color: AppColors.onCard(context),
         ),
-        backgroundColor: AppColors.primaryPurple,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
+      ),
+      iconTheme: IconThemeData(color: AppColors.onBackground(context)),
+      tabBarTheme: base.tabBarTheme.copyWith(
+        indicatorSize: TabBarIndicatorSize.tab,
+        labelColor: Colors.white,
+        unselectedLabelColor: AppColors.secondaryText(context),
+        labelStyle: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 13),
+        unselectedLabelStyle: GoogleFonts.inter(fontWeight: FontWeight.w500, fontSize: 13),
+        indicator: BoxDecoration(
+          color: AppColors.primaryPurple,
           borderRadius: BorderRadius.circular(12),
         ),
-        margin: const EdgeInsets.all(16),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppColors.primaryPurple,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppColors.onBackground(context),
+          side: BorderSide(color: AppColors.muted(context).withOpacity(0.4)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      ),
+      sliderTheme: base.sliderTheme.copyWith(
+        activeTrackColor: AppColors.primaryPurple,
+        thumbColor: AppColors.primaryPurple,
+        inactiveTrackColor: AppColors.muted(context).withOpacity(0.4),
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: AppColors.card(context),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: AppColors.card(context),
+        surfaceTintColor: Colors.transparent,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+      ),
+      chipTheme: base.chipTheme.copyWith(
+        backgroundColor: AppColors.selectedBackground(context),
+        selectedColor: AppColors.primaryPurple,
+        labelStyle: GoogleFonts.inter(color: AppColors.onBackground(context), fontSize: 12),
+        selectedShadowColor: Colors.transparent,
       ),
     );
   }
-
- 
 }
 
 

@@ -191,16 +191,6 @@ class AppTheme {
           color: colorScheme.onSurface,
         ),
       ),
-      bottomAppBarTheme: BottomAppBarTheme(color: AppColors.lightCard),
-             cardTheme: CardTheme(
-         color: AppColors.lightCard,
-         elevation: 1,
-         margin: const EdgeInsets.all(0),
-         shadowColor: const Color(0xFF64748B).withOpacity(0.08),
-         shape: RoundedRectangleBorder(
-           borderRadius: BorderRadius.circular(cardCornerRadius),
-         ),
-       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           elevation: 0,
@@ -209,15 +199,6 @@ class AppTheme {
             borderRadius: BorderRadius.circular(cornerRadius),
           ),
         ),
-      ),
-      tabBarTheme: TabBarTheme(
-        indicator: BoxDecoration(
-          gradient: AppGradients.primary,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        labelColor: Colors.white,
-        unselectedLabelColor: const Color(0xFF666666),
-        labelStyle: GoogleFonts.inter(fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -255,15 +236,6 @@ class AppTheme {
           color: AppColors.textPrimary,
         ),
       ),
-      bottomAppBarTheme: BottomAppBarTheme(color: AppColors.darkSurface),
-      cardTheme: CardTheme(
-        color: AppColors.darkCard,
-        elevation: 0,
-        margin: const EdgeInsets.all(0),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(cardCornerRadius),
-        ),
-      ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           elevation: 0,
@@ -272,15 +244,6 @@ class AppTheme {
             borderRadius: BorderRadius.circular(cornerRadius),
           ),
         ),
-      ),
-      tabBarTheme: TabBarTheme(
-        indicator: BoxDecoration(
-          gradient: AppGradients.primary,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        labelColor: Colors.white,
-        unselectedLabelColor: AppColors.textSecondary,
-        labelStyle: GoogleFonts.inter(fontWeight: FontWeight.w600),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,

@@ -42,6 +42,7 @@ class _LibraryPageState extends State<LibraryPage> {
       }
     });
     _uploadSub = UploadQueueService.instance.events.listen((event) {
+      if (!mounted) return;
       if (event['type'] == 'completed') {
         _refresh();
       }
@@ -73,9 +74,11 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Future<void> _loadMore() async {
+    if (!mounted) return;
     setState(() => _loading = true);
     try {
       final page = await _projects.list(limit: _limit, offset: _offset);
+      if (!mounted) return;
       setState(() {
         _items.addAll(page);
         _offset += page.length;
@@ -87,6 +90,7 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Future<void> _refresh() async {
+    if (!mounted) return;
     setState(() {
       _items.clear();
       _offset = 0;

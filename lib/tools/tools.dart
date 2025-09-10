@@ -2,3 +2,5 @@
 export 'crop_rotate/crop_rotate.dart';
 export 'filters/filters.dart';
 export 'ai_styles/ai_styles.dart';
+export 'adjust/adjust.dart';
+export 'add_text/add_text.dart';

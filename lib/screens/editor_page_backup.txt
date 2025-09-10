@@ -1,0 +1,442 @@
+import 'package:flutter/material.dart';
+import 'dart:ui';
+import '../theme/app_theme.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'dart:typed_data';
+import 'package:flutter/services.dart';
+import 'package:pro_image_editor/pro_image_editor.dart';
+import 'package:image/image.dart' as img;
+
+class EditorPage extends StatefulWidget {
+  final String imageAsset;
+  final String projectName;
+
+  const EditorPage({super.key, required this.imageAsset, required this.projectName});
+
+  @override
+  State<EditorPage> createState() => _EditorPageState();
+}
+
+class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateMixin {
+  late final TabController _tabController = TabController(length: 2, vsync: this);
+
+  // State for which tool UI is open
+  String? _openTool;
+
+  Uint8List? _imageBytes;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController.addListener(() => setState(() {}));
+    _loadAndDownscaleImage();
+  }
+
+  Future<void> _loadAndDownscaleImage() async {
+    try {
+      Uint8List raw;
+      if (widget.imageAsset.startsWith('http')) {
+        final data = await NetworkAssetBundle(Uri.parse(widget.imageAsset)).load(widget.imageAsset);
+        raw = data.buffer.asUint8List();
+      } else {
+        final data = await rootBundle.load(widget.imageAsset);
+        raw = data.buffer.asUint8List();
+      }
+      // Downscale if too large
+      final img.Image? decoded = img.decodeImage(raw);
+      if (decoded != null) {
+        const int maxSide = 2048;
+        final int w = decoded.width;
+        final int h = decoded.height;
+        if (w > maxSide || h > maxSide) {
+          final resized = img.copyResize(decoded, width: w > h ? maxSide : null, height: h >= w ? maxSide : null);
+          raw = img.encodeJpg(resized, quality: 90);
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _imageBytes = raw;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      extendBodyBehindAppBar: true,
+      backgroundColor: AppColors.background(context),
+      appBar: _buildAppBar(),
+      body: Stack(
+        children: [
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 120,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      AppColors.background(context).withOpacity(0.9),
+                      AppColors.background(context).withOpacity(0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            top: MediaQuery.of(context).size.height * 0.1,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Padding(
+              padding: EdgeInsets.only(bottom: _currentPanelHeight() + 60),
+              child: Center(
+                child: Hero(
+                  tag: widget.imageAsset,
+                  child: _buildImage(),
+                ),
+              ),
+            ),
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: SafeArea(
+              minimum: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
+              child: _buildControlPanel(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  PreferredSizeWidget _buildAppBar() {
+    return AppBar(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      leading: Container(
+        margin: const EdgeInsets.only(left: 8),
+        decoration: BoxDecoration(
+          color: AppColors.card(context).withOpacity(0.9),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: IconButton(
+          icon: Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: AppColors.onBackground(context),
+            size: 20,
+          ),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+      ),
+      title: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: AppColors.card(context).withOpacity(0.9),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          widget.projectName,
+          style: GoogleFonts.inter(
+            color: AppColors.onBackground(context),
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
+          ),
+        ),
+      ),
+      centerTitle: true,
+      actions: [
+        _buildActionButton(Icons.undo_rounded, 'Undo'),
+        _buildActionButton(Icons.redo_rounded, 'Redo'),
+        const SizedBox(width: 8),
+        Container(
+          margin: const EdgeInsets.only(right: 8),
+          decoration: BoxDecoration(
+            gradient: AppGradients.primary,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: IconButton(
+            icon: const Icon(Icons.check_rounded, color: Colors.white, size: 20),
+            onPressed: () async {
+              Navigator.of(context).maybePop();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildActionButton(IconData icon, String tooltip) {
+    return Container(
+      margin: const EdgeInsets.only(right: 4),
+      decoration: BoxDecoration(
+        color: AppColors.card(context).withOpacity(0.9),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: IconButton(
+        icon: Icon(icon, color: AppColors.onBackground(context), size: 20),
+        onPressed: () {},
+        tooltip: tooltip,
+      ),
+    );
+  }
+
+  Widget _buildControlPanel() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.card(context).withOpacity(0.85),
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+        border: Border.all(
+          color: AppColors.muted(context).withOpacity(0.25),
+          width: 1,
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(28),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_openTool != null) ...[
+                  Row(
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          color: AppColors.muted(context).withOpacity(0.6),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: IconButton(
+                          icon: Icon(
+                            Icons.arrow_back_ios_new_rounded,
+                            color: AppColors.onBackground(context),
+                            size: 20,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _openTool = null;
+                            });
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        _openTool ?? '',
+                        style: GoogleFonts.inter(
+                          color: AppColors.onBackground(context),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 18,
+                        ),
+                      ),
+                      const Spacer(),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                ] else ...[
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: AppColors.muted(context).withOpacity(0.6),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: TabBar(
+                      controller: _tabController,
+                      labelColor: Colors.white,
+                      unselectedLabelColor: AppColors.secondaryText(context),
+                      indicator: BoxDecoration(
+                        gradient: AppGradients.primary,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.primaryPurple.withOpacity(0.4),
+                            blurRadius: 8,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      labelStyle: GoogleFonts.inter(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                      ),
+                      unselectedLabelStyle: GoogleFonts.inter(
+                        fontWeight: FontWeight.w500,
+                        fontSize: 14,
+                      ),
+                      indicatorSize: TabBarIndicatorSize.tab,
+                      tabs: const [
+                        Tab(text: 'Manual'),
+                        Tab(text: 'AI'),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+
+                SizedBox(
+                  height: _currentContentHeight(),
+                  child: _buildToolUI(),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildImage() {
+    if (_loading) {
+      return const SizedBox(
+        width: 200,
+        height: 200,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (_imageBytes == null) {
+      return const Text('Failed to load image');
+    }
+    return ProImageEditor.memory(
+      _imageBytes!,
+      callbacks: ProImageEditorCallbacks(
+        onImageEditingComplete: (Uint8List bytes) async {
+          Navigator.pop(context, bytes);
+        },
+      ),
+    );
+  }
+
+  Widget _buildToolUI() {
+    switch (_openTool) {
+      case 'Filters':
+        return const SizedBox.shrink();
+      case 'Adjust':
+        return const SizedBox.shrink();
+      default:
+        return TabBarView(
+          controller: _tabController,
+          children: [
+            _manualTools(context),
+            _aiTools(context),
+          ],
+        );
+    }
+  }
+
+  Widget _manualTools(BuildContext context) {
+    final tools = [
+      (Icons.crop_rotate_rounded, 'Crop & Rotate', AppColors.primaryPurple),
+      (Icons.filter_vintage_rounded, 'Filters', AppColors.accentPurple),
+      (Icons.brightness_6_rounded, 'Adjust', AppColors.primaryBlue),
+      (Icons.text_fields_rounded, 'Add Text', AppColors.accentBlue),
+    ];
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: tools.map((tool) {
+        return _buildToolButton(
+          icon: tool.$1,
+          label: tool.$2,
+          color: tool.$3,
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _aiTools(BuildContext context) {
+    return const SizedBox(height: 120);
+  }
+
+  Widget _buildToolButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+  }) {
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _openTool = label;
+        });
+      },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [color, color.withOpacity(0.8)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: color.withOpacity(0.3),
+                  blurRadius: 12,
+                  spreadRadius: 0,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Icon(
+              icon,
+              color: Colors.white,
+              size: 24,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: GoogleFonts.inter(
+              color: AppColors.onBackground(context),
+              fontWeight: FontWeight.w500,
+              fontSize: 12,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  double _currentContentHeight() {
+    if (_openTool != null) return 210;
+    return 180;
+  }
+
+  double _currentPanelHeight() {
+    const double padding = 32;
+    const double headerOrTabs = 64;
+    return headerOrTabs + _currentContentHeight() + padding;
+  }
+}

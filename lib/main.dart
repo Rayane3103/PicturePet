@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uni_links/uni_links.dart';
+import 'package:app_links/app_links.dart';
 import 'dart:async';
 import 'dart:io';
 import 'theme/app_theme.dart';
@@ -96,17 +96,14 @@ class _MediaUsAppState extends State<MediaUsApp> {
     }
     
     try {
-      // Handle deep links when app is already running
-      _linkSubscription = uriLinkStream.listen((Uri? uri) {
-        if (uri != null) {
-          _handleDeepLink(uri);
-        }
+      final appLinks = AppLinks();
+      _linkSubscription = appLinks.uriLinkStream.listen((Uri uri) {
+        _handleDeepLink(uri);
       }, onError: (err) {
         print('Deep link error: $err');
       });
 
-      // Handle deep link that opened the app
-      getInitialUri().then((Uri? uri) {
+      appLinks.getInitialLink().then((Uri? uri) {
         if (uri != null) {
           _handleDeepLink(uri);
         }

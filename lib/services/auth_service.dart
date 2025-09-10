@@ -359,7 +359,7 @@ class AuthService {
       print('Using redirect URL: $redirectUrl');
       
       await _supabase.auth.signInWithOAuth(
-        Provider.google,
+        OAuthProvider.google,
         redirectTo: redirectUrl,
         queryParams: const {
           'access_type': 'offline',
@@ -390,7 +390,7 @@ class AuthService {
       print('Using redirect URL: $redirectUrl');
       
       await _supabase.auth.signInWithOAuth(
-        Provider.facebook,
+        OAuthProvider.facebook,
         redirectTo: redirectUrl,
         authScreenLaunchMode: isMobilePlatform
             ? LaunchMode.inAppWebView

@@ -46,7 +46,7 @@ dependencies:
   flutter_dotenv: ^5.1.0
   
   # Supabase dependencies
-  supabase_flutter: ^1.10.25
+  supabase_flutter: ^2.10.0
   flutter_secure_storage: ^8.0.0
   
   # Social auth dependencies
@@ -54,9 +54,11 @@ dependencies:
   flutter_facebook_auth: ^6.0.4
   
   # Deep linking
-  uni_links: ^0.5.1
+  app_links: ^6.4.1
   # In-app webview for OAuth (used by Supabase signInWithOAuth)
   url_launcher: ^6.3.1
+  image_editor: ^1.6.0
+  pro_image_editor: ^11.5.6
 
 dev_dependencies:
   flutter_test:

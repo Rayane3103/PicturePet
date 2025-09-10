@@ -1,5 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uni_links/uni_links.dart';
+import 'package:app_links/app_links.dart';
 import 'dart:async';
 import 'dart:io';
 import '../config/supabase_config.dart';
@@ -26,17 +26,15 @@ class MobileOAuthHandler {
     }
     
     try {
-      _linkSubscription = uriLinkStream.listen((Uri? uri) {
-        if (uri != null) {
-          _handleOAuthCallback(uri);
-        }
+      final appLinks = AppLinks();
+      _linkSubscription = appLinks.uriLinkStream.listen((Uri uri) {
+        _handleOAuthCallback(uri);
       }, onError: (err) {
         print('Mobile OAuth error: $err');
         _authCompleter?.completeError(err);
       });
 
-      // Handle OAuth callback that opened the app
-      getInitialUri().then((Uri? uri) {
+      appLinks.getInitialLink().then((Uri? uri) {
         if (uri != null) {
           _handleOAuthCallback(uri);
         }
@@ -104,7 +102,7 @@ class MobileOAuthHandler {
   }
 
   /// Start OAuth flow with web redirect
-  static Future<AuthResponse> startOAuthFlow(Provider provider) async {
+  static Future<AuthResponse> startOAuthFlow(OAuthProvider provider) async {
     if (!isMobilePlatform) {
       throw UnsupportedError('OAuth flow not supported on web platform');
     }
@@ -118,7 +116,7 @@ class MobileOAuthHandler {
       await Supabase.instance.client.auth.signInWithOAuth(
         provider,
         redirectTo: SupabaseConfig.getMobileCallbackUrl(),
-        queryParams: provider == Provider.google ? {
+        queryParams: provider == OAuthProvider.google ? {
           'access_type': 'offline',
           'prompt': 'consent',
         } : null,

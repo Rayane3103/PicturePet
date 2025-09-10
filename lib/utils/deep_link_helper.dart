@@ -1,25 +1,26 @@
-import 'package:uni_links/uni_links.dart';
+import 'package:app_links/app_links.dart';
 import 'dart:async';
 
 class DeepLinkHelper {
   static StreamSubscription? _linkSubscription;
   
   /// Initialize deep link handling
-  static void initialize() {
-    _linkSubscription = uriLinkStream.listen((Uri? uri) {
-      if (uri != null) {
-        _handleDeepLink(uri);
-      }
+  static Future<void> initialize() async {
+    final appLinks = AppLinks();
+    _linkSubscription = appLinks.uriLinkStream.listen((Uri uri) {
+      _handleDeepLink(uri);
     }, onError: (err) {
       print('Deep link error: $err');
     });
 
-    // Handle deep link that opened the app
-    getInitialUri().then((Uri? uri) {
-      if (uri != null) {
-        _handleDeepLink(uri);
+    try {
+      final Uri? initialUri = await appLinks.getInitialLink();
+      if (initialUri != null) {
+        _handleDeepLink(initialUri);
       }
-    });
+    } catch (err) {
+      print('Deep link initial error: $err');
+    }
   }
 
   /// Dispose of deep link subscription
