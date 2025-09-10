@@ -1,0 +1,55 @@
+[info] Resolving ssh remote authority 'd6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev:22' (Unparsed 'ssh-remote+d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev:22') (attempt #1)
+[info] SSH askpass server listening on port 52637
+[debug] hostname: d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev, remote platform map: {"705edd3f-14a3-4d15-9fab-4f7eda9c9ab3-00-2pfjgc3ed9bqc.kirk.replit.dev":"windows","PicturePet":"linux","d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev":"windows"}
+[info] Using configured platform windows for remote host d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev
+[debug] hostname: d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev, remote server install map: {}
+[info] Using askpass script: c:\Users\Rayane\.cursor\extensions\anysphere.remote-ssh-1.0.29\dist\scripts\launchSSHAskpass.bat with javascript file c:\Users\Rayane\.cursor\extensions\anysphere.remote-ssh-1.0.29\dist\scripts\sshAskClient.js. Askpass handle: 52637
+[info] Command length (8191 max): 7618
+[info] Launching SSH server via shell with command: type "C:\Users\Rayane\AppData\Local\Temp\cursor_remote_install_3294c992-fd07-41c0-8baa-3ff4ac891db2.ps1" | ssh -T -D 52638 -p 22 d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev powershell -NoProfile
+[info] Establishing SSH connection: type "C:\Users\Rayane\AppData\Local\Temp\cursor_remote_install_3294c992-fd07-41c0-8baa-3ff4ac891db2.ps1" | ssh -T -D 52638 -p 22 d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev powershell -NoProfile
+[info] Waiting for server to install. Timeout: 180000ms
+[info] (ssh_tunnel) stderr: Welcome to the Replit SSH Proxy.
+
+Visit https://docs.replit.com/replit-workspace/ssh to learn more about SSH on Replit.
+
+[info] Askpass server received request: POST /
+[info] Askpass server received request body: {"request":"d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev's password: "}
+[info] Pausing timeout; waiting for askpass response
+[info] Received SSH askpass request: d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev's password: 
+[error] Password authentication cancelled
+[info] Resuming timeout; askpass response received
+[info] (ssh_tunnel) stderr: Server returned status code: 500
+
+[info] (ssh_tunnel) stderr: Permission denied, please try again.
+
+[info] Askpass server received request: POST /
+[info] Askpass server received request body: {"request":"d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev's password: "}
+[info] Pausing timeout; waiting for askpass response
+[info] Received SSH askpass request: d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev's password: 
+[error] Password authentication cancelled
+[info] Resuming timeout; askpass response received
+[info] (ssh_tunnel) stderr: Server returned status code: 500
+
+[info] (ssh_tunnel) stderr: Permission denied, please try again.
+
+[info] Askpass server received request: POST /
+[info] Askpass server received request body: {"request":"d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev's password: "}
+[info] Pausing timeout; waiting for askpass response
+[info] Received SSH askpass request: d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev's password: 
+[error] Password authentication cancelled
+[info] Resuming timeout; askpass response received
+[info] (ssh_tunnel) stderr: Server returned status code: 500
+
+[info] (ssh_tunnel) stderr: d6bd3a6b-1086-424b-8600-2682bba3279c@d6bd3a6b-1086-424b-8600-2682bba3279c-00-2g1cqiwruqzd5.kirk.replit.dev: Permission denied (password,publickey).
+
+[info] (ssh_tunnel) stderr: The process tried to write to a nonexistent pipe.
+
+[error] Error installing server: [Error: Failed to connect to the remote SSH host. Please check the logs for more details.
+	at t.installCodeServer (c:\Users\Rayane\.cursor\extensions\anysphere.remote-ssh-1.0.29\dist\main.js:2:946844)
+	at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+	at async c:\Users\Rayane\.cursor\extensions\anysphere.remote-ssh-1.0.29\dist\main.js:2:401946]
+[info] Deleting local script C:\Users\Rayane\AppData\Local\Temp\cursor_remote_install_3294c992-fd07-41c0-8baa-3ff4ac891db2.ps1
+[error] Error resolving SSH authority [Error: Failed to connect to the remote SSH host. Please check the logs for more details.
+	at t.installCodeServer (c:\Users\Rayane\.cursor\extensions\anysphere.remote-ssh-1.0.29\dist\main.js:2:946844)
+	at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+	at async c:\Users\Rayane\.cursor\extensions\anysphere.remote-ssh-1.0.29\dist\main.js:2:401946]
