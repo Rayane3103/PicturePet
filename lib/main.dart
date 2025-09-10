@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:app_links/app_links.dart';
 import 'dart:async';
-import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'theme/app_theme.dart';
 import 'screens/onboarding_splash.dart';
 import 'screens/onboarding_page.dart';
@@ -81,11 +81,11 @@ class _MediaUsAppState extends State<MediaUsApp> {
 
   void _checkPlatform() {
     try {
-      _isMobilePlatform = Platform.isAndroid || Platform.isIOS;
+      _isMobilePlatform = !kIsWeb;
       print('Platform detected: ${_isMobilePlatform ? "Mobile" : "Web"}');
     } catch (e) {
       _isMobilePlatform = false;
-      print('Platform detected: Web (Platform.isAndroid/iOS not available)');
+
     }
   }
 

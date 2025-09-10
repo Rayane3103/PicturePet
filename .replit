@@ -5,3 +5,36 @@ expertMode = true
 [nix]
 channel = "stable-25_05"
 packages = ["flutter", "git", "unzip", "xz", "which", "cacert"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "flutter-web"
+
+[[workflows.workflow]]
+name = "flutter-web"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "flutter run -d web-server --release --web-hostname 0.0.0.0 --web-port 5000 --dart-define=SUPABASE_URL=${SUPABASE_URL} --dart-define=SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["python", "-m", "http.server", "5000", "--directory", "build/web"]
+build = ["flutter", "build", "web", "--release", "--dart-define=SUPABASE_URL=${SUPABASE_URL}", "--dart-define=SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"]
