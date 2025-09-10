@@ -58,7 +58,7 @@ dependencies:
   # In-app webview for OAuth (used by Supabase signInWithOAuth)
   url_launcher: ^6.3.1
   image_editor: ^1.6.0
-  pro_image_editor: ^11.5.6
+  pro_image_editor: ^11.3.0
 
 dev_dependencies:
   flutter_test:
