@@ -185,14 +185,11 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     _uploadSub = UploadQueueService.instance.events.listen((event) {
-      if (event['type'] == 'completed' && event['media'] is Map<String, dynamic>) {
-        final media = event['media'] as Map<String, dynamic>;
-        final url = media['url'] as String?;
-        if (url != null && mounted) {
+      if (event['type'] == 'completed' && mounted) {
+        final projectId = event['project_id'] as String?;
+        if (projectId != null) {
           Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => EditorPage(imageAsset: url, projectName: 'Project'),
-            ),
+            MaterialPageRoute(builder: (_) => EditorPage(projectId: projectId)),
           );
         }
       }
@@ -204,11 +201,9 @@ class _HomeShellState extends State<HomeShell> {
     final pages = [
       LibraryPage(
         onNewProject: _openAddSheet,
-        onOpenProject: (asset) {
+        onOpenProjectId: (projectId) {
           Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => EditorPage(imageAsset: asset, projectName: 'Project'),
-            ),
+            MaterialPageRoute(builder: (_) => EditorPage(projectId: projectId)),
           );
         },
       ),

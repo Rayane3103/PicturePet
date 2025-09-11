@@ -30,35 +30,46 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  
+  # Core Flutter packages
+  meta: ^1.15.0
+  vector_math: ^2.1.4
+  collection: ^1.18.0
+  characters: ^1.3.0
+  
+  # UI and Layout
   flutter_staggered_grid_view: ^0.7.0
-
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.2
   google_fonts: ^6.2.1
+  
+  # Image handling
   image_picker: ^1.0.7
   flutter_image_compress: ^2.3.0
   image: ^4.1.7
+  image_editor: ^1.6.0
+  pro_image_editor: ^11.3.0
+  
+  # Storage and preferences
   shared_preferences: ^2.2.2
-  crypto: ^3.0.3
+  flutter_secure_storage: ^8.0.0
   path_provider: ^2.1.2
   path: ^1.9.0
+  
+  # Utilities
+  crypto: ^3.0.3
   flutter_dotenv: ^5.1.0
   
   # Supabase dependencies
   supabase_flutter: ^2.10.0
-  flutter_secure_storage: ^8.0.0
   
   # Social auth dependencies
   google_sign_in: ^6.1.6
   flutter_facebook_auth: ^6.0.4
   
-  # Deep linking
+  # Deep linking and navigation
   app_links: ^6.4.1
-  # In-app webview for OAuth (used by Supabase signInWithOAuth)
   url_launcher: ^6.3.1
-  image_editor: ^1.6.0
-  pro_image_editor: ^11.3.0
+  http: ^1.2.2
 
 dev_dependencies:
   flutter_test:

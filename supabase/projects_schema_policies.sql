@@ -8,7 +8,8 @@ create table if not exists public.projects (
   output_image_url text,
   thumbnail_url text,
   file_size_bytes bigint,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 create index if not exists idx_projects_user_created on public.projects (user_id, created_at desc);
@@ -23,5 +24,20 @@ create policy "Insert own projects" on public.projects for insert with check (au
 
 drop policy if exists "Delete own projects" on public.projects;
 create policy "Delete own projects" on public.projects for delete using (auth.uid() = user_id);
+
+
+-- Trigger to keep updated_at fresh
+create or replace function public.set_projects_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_projects_updated_at on public.projects;
+create trigger trg_projects_updated_at
+before update on public.projects
+for each row execute function public.set_projects_updated_at();
 
 

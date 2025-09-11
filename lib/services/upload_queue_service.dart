@@ -177,7 +177,16 @@ class UploadQueueService {
         uploadCompleted = true;
         try { ticker?.cancel(); } catch (_) {}
         _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'finalizing', 'progress': 0.95});
-        _events.add({'type': 'completed', 'filename': task.filename, 'media': _serializeMedia(uploadedMedia)});
+        final mediaJson = _serializeMedia(uploadedMedia);
+        final createdProjectId = (mediaJson['metadata'] is Map && mediaJson['metadata']['created_project_id'] is String)
+            ? mediaJson['metadata']['created_project_id'] as String
+            : null;
+        _events.add({
+          'type': 'completed',
+          'filename': task.filename,
+          'media': mediaJson,
+          if (createdProjectId != null) 'project_id': createdProjectId,
+        });
       } catch (e) {
         Logger.error('Upload failed', context: {'error': e.toString(), 'filename': task.filename});
         // Keep a reference for retry

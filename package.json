@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "@supabase/mcp-server-postgrest": "^0.1.0"
+  }
+}

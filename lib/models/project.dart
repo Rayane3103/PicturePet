@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart';
+import 'package:meta/meta.dart';
 
 @immutable
 class Project {
@@ -10,6 +10,7 @@ class Project {
   final String? thumbnailUrl;
   final int? fileSizeBytes;
   final DateTime createdAt;
+  final DateTime updatedAt;
 
   const Project({
     required this.id,
@@ -20,6 +21,7 @@ class Project {
     required this.thumbnailUrl,
     required this.fileSizeBytes,
     required this.createdAt,
+    required this.updatedAt,
   });
 
   static Project fromMap(Map<String, dynamic> map) {
@@ -32,6 +34,7 @@ class Project {
       thumbnailUrl: map['thumbnail_url'] as String?,
       fileSizeBytes: map['file_size_bytes'] as int?,
       createdAt: DateTime.parse(map['created_at'] as String),
+      updatedAt: DateTime.parse((map['updated_at'] as String?) ?? (map['created_at'] as String)),
     );
   }
 }

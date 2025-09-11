@@ -1,17 +1,25 @@
 import 'package:flutter/material.dart';
 import 'dart:ui';
-import '../theme/app_theme.dart';
+// duplicate import removed
 import 'package:google_fonts/google_fonts.dart';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:pro_image_editor/pro_image_editor.dart';
 import 'package:image/image.dart' as img;
+import '../repositories/media_repository.dart';
+import '../repositories/projects_repository.dart';
+import '../repositories/project_edits_repository.dart';
+import '../theme/app_theme.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:url_launcher/url_launcher.dart';
+import '../repositories/tools_repository.dart';
+import '../services/projects_events.dart';
 
 class EditorPage extends StatefulWidget {
-  final String imageAsset;
-  final String projectName;
+  final String projectId;
 
-  const EditorPage({super.key, required this.imageAsset, required this.projectName});
+  const EditorPage({super.key, required this.projectId});
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -22,22 +30,54 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
 
   Uint8List? _imageBytes;
   bool _loading = true;
+  bool _saving = false;
+  String? _error;
+
+  final MediaRepository _mediaRepo = MediaRepository();
+  final ProjectsRepository _projectsRepo = ProjectsRepository();
+  final ProjectEditsRepository _editsRepo = ProjectEditsRepository();
+  final ToolsRepository _toolsRepo = ToolsRepository();
+  String? _originalOrLastUrl;
 
   @override
   void initState() {
     super.initState();
     _tabController.addListener(() => setState(() {}));
-    _loadAndDownscaleImage();
+    _initProjectAndLoad();
   }
 
-  Future<void> _loadAndDownscaleImage() async {
+  Future<void> _initProjectAndLoad() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final project = await _projectsRepo.getById(widget.projectId);
+      if (project == null) throw Exception('Project not found');
+      _originalOrLastUrl = project.outputImageUrl ?? project.originalImageUrl;
+      if (_originalOrLastUrl == null) throw Exception('Project has no image URL');
+      await _loadAndDownscaleImage(_originalOrLastUrl!);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Failed to load project: ${e.toString()}';
+      });
+    }
+  }
+
+  Future<void> _loadAndDownscaleImage(String urlOrAsset) async {
     try {
       Uint8List raw;
-      if (widget.imageAsset.startsWith('http')) {
-        final data = await NetworkAssetBundle(Uri.parse(widget.imageAsset)).load(widget.imageAsset);
-        raw = data.buffer.asUint8List();
+      if (urlOrAsset.startsWith('http')) {
+        final Uri uri = Uri.parse(urlOrAsset);
+        final http.Response resp = await http.get(uri);
+        if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) {
+          throw Exception('HTTP ${resp.statusCode}');
+        }
+        raw = resp.bodyBytes;
       } else {
-        final data = await rootBundle.load(widget.imageAsset);
+        final data = await rootBundle.load(urlOrAsset);
         raw = data.buffer.asUint8List();
       }
       // Downscale if too large
@@ -56,10 +96,11 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         _imageBytes = raw;
         _loading = false;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         _loading = false;
+        _error = 'Failed to load image${kIsWeb ? ' (web)' : ''}: ${e.toString()}';
       });
     }
   }
@@ -73,6 +114,16 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Editor'),
+        actions: [
+          IconButton(
+            tooltip: 'Versions',
+            icon: const Icon(Icons.history_rounded),
+            onPressed: _openVersions,
+          ),
+        ],
+      ),
       backgroundColor: AppColors.background(context),
       body: Stack(
         children: [
@@ -80,6 +131,13 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
             child: _buildImage(),
           ),
           _buildAiSideOverlay(),
+          if (_saving)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black.withOpacity(0.35),
+                child: const Center(child: CircularProgressIndicator()),
+              ),
+            ),
         ],
       ),
       bottomNavigationBar: SafeArea(
@@ -156,7 +214,57 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       );
     }
     if (_imageBytes == null) {
-      return const Text('Failed to load image');
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.broken_image_outlined, color: AppColors.secondaryText(context), size: 42),
+            const SizedBox(height: 12),
+            Text(
+              _error ?? 'Failed to load image',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _loading = true;
+                      _error = null;
+                    });
+                    if (_originalOrLastUrl != null) _loadAndDownscaleImage(_originalOrLastUrl!);
+                  },
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+                const SizedBox(width: 8),
+                if ((_originalOrLastUrl ?? '').startsWith('http'))
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final uri = Uri.tryParse(_originalOrLastUrl ?? '');
+                      if (uri != null) {
+                        await launchUrl(uri, mode: LaunchMode.externalApplication);
+                      }
+                    },
+                    icon: const Icon(Icons.open_in_new),
+                    label: const Text('Open URL'),
+                  ),
+              ],
+            ),
+            if (kIsWeb)
+              Padding(
+                padding: const EdgeInsets.only(top: 8.0),
+                child: Text(
+                  'If this persists on web, ensure the image host allows CORS.',
+                  style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+      );
     }
     return Theme(
       data: _editorTheme(context),
@@ -176,8 +284,162 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         ),
         callbacks: ProImageEditorCallbacks(
           onImageEditingComplete: (Uint8List bytes) async {
-            Navigator.pop(context, bytes);
+            await _handleSave(bytes);
           },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openVersions() async {
+    try {
+      final edits = await _editsRepo.listForProject(widget.projectId, limit: 50);
+      if (!mounted) return;
+      // ignore: use_build_context_synchronously
+      await showModalBottomSheet(
+        context: context,
+        backgroundColor: AppColors.card(context),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+        builder: (_) {
+          return SafeArea(
+            child: ListView.builder(
+              itemCount: edits.length,
+              itemBuilder: (ctx, i) {
+                final e = edits[i];
+                final thumbUrl = e.outputImageUrl ?? e.inputImageUrl;
+                return ListTile(
+                  leading: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: thumbUrl != null
+                        ? Image.network(
+                            thumbUrl,
+                            width: 48,
+                            height: 48,
+                            fit: BoxFit.cover,
+                            errorBuilder: (c, err, st) => Container(
+                              width: 48,
+                              height: 48,
+                              color: AppColors.muted(context),
+                              child: Icon(Icons.image_not_supported_outlined, color: AppColors.secondaryText(context), size: 20),
+                            ),
+                          )
+                        : Container(
+                            width: 48,
+                            height: 48,
+                            color: AppColors.muted(context),
+                            child: Icon(Icons.image_outlined, color: AppColors.secondaryText(context), size: 20),
+                          ),
+                  ),
+                  title: Text(e.editName, style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w600)),
+                  subtitle: Text(e.createdAt.toLocal().toString(), style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12)),
+                  onTap: () async {
+                    final url = e.outputImageUrl ?? e.inputImageUrl;
+                    if (url != null) {
+                      Navigator.of(ctx).pop();
+                      setState(() {
+                        _originalOrLastUrl = url;
+                        _loading = true;
+                        _error = null;
+                      });
+                      await _loadAndDownscaleImage(url);
+                    }
+                  },
+                );
+              },
+            ),
+          );
+        },
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _handleSave(Uint8List bytes) async {
+    if (!mounted) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final uploaded = await _mediaRepo.uploadBytes(
+        bytes: bytes,
+        filename: 'edited.jpg',
+        contentType: 'image/jpeg',
+        thumbnailBytes: bytes, // simple same-bytes thumbnail; upstream compress handles size
+        metadata: {
+          'source': 'editor_page',
+          'tool_chain': 'manual',
+        },
+      );
+
+      final updated = await _projectsRepo.updateOutputUrl(
+        projectId: widget.projectId,
+        outputImageUrl: uploaded.url,
+        thumbnailUrl: uploaded.thumbnailUrl,
+      );
+      // Notify library listeners to refresh thumbnails
+      try {
+        // lazy import avoided to keep file slim; using events service here would create a circular dep
+      } catch (_) {}
+
+      // Log edit entry (manual session) with required tool_id
+      final manualToolId = await _toolsRepo.getToolIdByName('manual_editor');
+      await _editsRepo.insert(
+        projectId: updated.id,
+        toolId: manualToolId,
+        editName: 'Manual Editor',
+        parameters: {
+          'editor': 'ProImageEditor',
+          'notes': 'Exported from manual tab',
+        },
+        inputImageUrl: _originalOrLastUrl,
+        outputImageUrl: uploaded.url,
+        creditCost: 0,
+        status: 'completed',
+      );
+
+      // Stay in editor: update in-memory image so user can continue editing
+      if (!mounted) return;
+      setState(() {
+        _originalOrLastUrl = uploaded.url;
+        _imageBytes = bytes;
+      });
+      // Notify library to refresh thumbnails in background
+      ProjectsEvents.instance.notifyChanged();
+      // Friendly success toast
+      // ignore: use_build_context_synchronously
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          behavior: SnackBarBehavior.floating,
+          content: Text('Saved'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+      });
+      _showSaveErrorSnack();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  void _showSaveErrorSnack() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Colors.redAccent,
+        content: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.white),
+            const SizedBox(width: 8),
+            Expanded(child: Text(_error ?? 'Failed to save', style: const TextStyle(color: Colors.white))),
+          ],
         ),
       ),
     );
@@ -212,7 +474,23 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 width: 1,
               ),
             ),
-            child: _buildAiPanelContent(),
+            child: Stack(
+              children: [
+                _buildAiPanelContent(),
+                if (_saving)
+                  Positioned.fill(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.35),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Center(
+                        child: CircularProgressIndicator(),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),

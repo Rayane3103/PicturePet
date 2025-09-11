@@ -6,15 +6,17 @@ import 'dart:async';
 import '../repositories/projects_repository.dart';
 import '../models/project.dart';
 import '../services/upload_queue_service.dart';
+import 'project_details_page.dart';
+import '../services/projects_events.dart';
 
 class LibraryPage extends StatefulWidget {
   final void Function()? onNewProject;
-  final void Function(String imageAsset)? onOpenProject;
+  final void Function(String projectId)? onOpenProjectId;
 
   const LibraryPage({
     super.key,
     this.onNewProject,
-    this.onOpenProject,
+    this.onOpenProjectId,
   });
 
   @override
@@ -27,6 +29,8 @@ class _LibraryPageState extends State<LibraryPage> {
   final ScrollController _scroll = ScrollController();
   StreamSubscription<Map<String, dynamic>>? _uploadSub;
   final List<Map<String, dynamic>> _uploadStatuses = [];
+  final Map<String, Timer> _pendingDeleteTimers = {};
+  final Map<String, Project> _pendingDeleteProjects = {};
   bool _loading = false;
   bool _hasMore = true;
   int _offset = 0;
@@ -71,6 +75,12 @@ class _LibraryPageState extends State<LibraryPage> {
         });
       }
     });
+    // Listen for project changes (rename/duplicate/delete/save)
+    ProjectsEvents.instance.stream.listen((_) {
+      if (mounted) {
+        _refresh();
+      }
+    });
   }
 
   Future<void> _loadMore() async {
@@ -107,10 +117,7 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   void _open(Project p) {
-    final url = p.outputImageUrl ?? p.originalImageUrl;
-    if (url != null) {
-      widget.onOpenProject?.call(url);
-    }
+    widget.onOpenProjectId?.call(p.id);
   }
 
   Widget _card(Project p) {
@@ -119,6 +126,11 @@ class _LibraryPageState extends State<LibraryPage> {
       color: Colors.transparent,
       child: InkWell(
         onTap: () => _open(p),
+        onLongPress: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => ProjectDetailsPage(projectId: p.id)),
+          );
+        },
         borderRadius: BorderRadius.circular(AppTheme.cardCornerRadius),
         child: Container(
           height: 300,
@@ -187,7 +199,7 @@ class _LibraryPageState extends State<LibraryPage> {
                           const SizedBox(width: 4),
                           Expanded(
                             child: Text(
-                              _formatDate(p.createdAt.toLocal()),
+                              _formatDate(p.updatedAt.toLocal()),
                               style: GoogleFonts.inter(
                                 color: Colors.white70,
                                 fontSize: 10,
@@ -197,6 +209,8 @@ class _LibraryPageState extends State<LibraryPage> {
                               //overflow: TextOverflow.clip,
                             ),
                           ),
+                          const SizedBox(width: 8),
+                          _projectActions(p),
                         ],
                       ),
                     ],
@@ -206,6 +220,132 @@ class _LibraryPageState extends State<LibraryPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _projectActions(Project p) {
+    return PopupMenuButton<String>(
+      padding: EdgeInsets.zero,
+      icon: const Icon(Icons.more_horiz, color: Colors.white70, size: 18),
+      onSelected: (v) async {
+        switch (v) {
+          case 'rename':
+            final newName = await _promptRename(p.name);
+            if (newName != null) {
+              final oldName = p.name;
+              await _projects.rename(projectId: p.id, newName: newName);
+              _refresh();
+              _showUndoSnack('Renamed to "$newName"', () async {
+                await _projects.rename(projectId: p.id, newName: oldName);
+                _refresh();
+              });
+            }
+            break;
+          case 'duplicate':
+            final newName = await _promptRename('${p.name} (copy)');
+            if (newName != null) {
+              final dup = await _projects.duplicate(projectId: p.id, newName: newName);
+              _refresh();
+              _showUndoSnack('Duplicated as "$newName"', () async {
+                await _projects.deleteProjectCascade(projectId: dup.id);
+                _refresh();
+              });
+            }
+            break;
+          case 'delete':
+            final ok = await _confirmDelete(p.name);
+            if (ok == true) {
+              // Optimistic UI: remove from list and schedule actual delete after grace period
+              _pendingDeleteProjects[p.id] = p;
+              setState(() {
+                _items.removeWhere((it) => it.id == p.id);
+              });
+              _showUndoSnack('Project deleted', () async {
+                final t = _pendingDeleteTimers.remove(p.id);
+                t?.cancel();
+                final proj = _pendingDeleteProjects.remove(p.id);
+                if (proj != null) {
+                  // Add back and refresh ordering
+                  setState(() {
+                    _items.insert(0, proj);
+                  });
+                  _refresh();
+                }
+              });
+              _pendingDeleteTimers[p.id]?.cancel();
+              _pendingDeleteTimers[p.id] = Timer(const Duration(seconds: 5), () async {
+                try {
+                  await _projects.deleteProjectCascade(projectId: p.id);
+                } finally {
+                  _pendingDeleteTimers.remove(p.id);
+                  _pendingDeleteProjects.remove(p.id);
+                  _refresh();
+                }
+              });
+            }
+            break;
+        }
+      },
+      itemBuilder: (ctx) => const [
+        PopupMenuItem(value: 'rename', child: Text('Rename')),
+        PopupMenuItem(value: 'duplicate', child: Text('Duplicate')),
+        PopupMenuItem(value: 'delete', child: Text('Delete')),
+      ],
+    );
+  }
+
+  Future<String?> _promptRename(String current) async {
+    String value = current;
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Rename project'),
+          content: TextField(
+            autofocus: true,
+            controller: TextEditingController(text: current),
+            onChanged: (v) => value = v,
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, value.trim().isEmpty ? null : value.trim()), child: const Text('Save')),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<bool?> _confirmDelete(String name) async {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Delete project'),
+          content: Text('This will permanently delete "$name" and its edit history.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showUndoSnack(String message, Future<void> Function() onUndo) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () {
+            onUndo();
+          },
+        ),
+        duration: const Duration(seconds: 5),
       ),
     );
   }

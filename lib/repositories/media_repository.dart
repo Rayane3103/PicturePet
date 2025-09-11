@@ -95,6 +95,25 @@ class MediaRepository {
       );
     }
 
+    // Optionally create a project on first upload if a name is provided
+    String? createdProjectId;
+    if (projectName != null && projectName.isNotEmpty) {
+      try {
+        await retry(() async {
+          final row = await _client.from('projects').insert({
+            'user_id': ownerId,
+            'name': projectName,
+            'original_image_url': url,
+            'thumbnail_url': thumbUrl,
+            'file_size_bytes': bytes.length,
+          }).select('id').single();
+          createdProjectId = row['id'] as String;
+        });
+      } catch (e) {
+        Logger.warn('Project creation failed', context: {'error': e.toString()});
+      }
+    }
+
     final media = await createMediaRecord(
       ownerId: ownerId,
       storagePath: objectPath,
@@ -103,24 +122,11 @@ class MediaRepository {
       mimeType: contentType,
       sizeBytes: bytes.length,
       checksum: checksum,
-      metadata: metadata,
+      metadata: {
+        ...metadata,
+        if (createdProjectId != null) 'created_project_id': createdProjectId,
+      },
     );
-    // Optionally create a project on first upload if a name is provided
-    if (projectName != null && projectName.isNotEmpty) {
-      try {
-        await retry(() async {
-          await _client.from('projects').insert({
-            'user_id': ownerId,
-            'name': projectName,
-            'original_image_url': url,
-            'thumbnail_url': thumbUrl,
-            'file_size_bytes': bytes.length,
-          });
-        });
-      } catch (e) {
-        Logger.warn('Project creation failed', context: {'error': e.toString()});
-      }
-    }
     return media;
   }
 

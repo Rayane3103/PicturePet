@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:app_links/app_links.dart';
 import 'dart:async';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'theme/app_theme.dart';
 import 'screens/onboarding_splash.dart';
 import 'screens/onboarding_page.dart';
@@ -17,9 +18,8 @@ import 'services/mobile_oauth_handler.dart';
 import 'utils/logger.dart';
 import 'screens/media_history_page.dart';
 import 'services/upload_queue_service.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-// comment to test the sync of the replit, yes it's working fine.
+// comment to test the synccccccceedd
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterError.onError = (details) {

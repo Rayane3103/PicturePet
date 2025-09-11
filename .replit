@@ -1,10 +1,10 @@
-modules = ["cpp-clang14", "swift-5.8", "dart-3.8"]
+modules = ["cpp-clang14", "dart-3.8", "nodejs-20", "swift-5.8"]
 [agent]
 expertMode = true
 
 [nix]
 channel = "stable-25_05"
-packages = ["flutter", "git", "unzip", "xz", "which", "cacert"]
+packages = ["flutter", "git", "unzip", "xz", "which", "cacert", "android-tools"]
 
 [workflows]
 runButton = "Project"
