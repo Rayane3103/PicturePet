@@ -37,7 +37,6 @@ class FalConfig {
   }
 
   // REST model paths
-  static const String modelIdeogramV3EditPath = 'fal-ai/ideogram/v3/edit';
+  static const String modelNanoBananaEditPath = 'fal-ai/nano-banana/edit';
 }
-
 

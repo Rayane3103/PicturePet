@@ -28,8 +28,7 @@ class FalAiService {
     final String mime = _detectMimeType(inputImageBytes);
     final String dataUrl = 'data:$mime;base64,${base64Encode(inputImageBytes)}';
 
-    final Uri uri =
-        Uri.parse('${FalConfig.baseUrl}/${FalConfig.modelIdeogramV3EditPath}');
+    final Uri uri = Uri.parse('${FalConfig.baseUrl}/${FalConfig.modelNanoBananaEditPath}');
 
     final Map<String, String> headers = <String, String>{
       'Content-Type': 'application/json',
@@ -61,28 +60,25 @@ class FalAiService {
     final Map<String, dynamic> json =
         jsonDecode(resp.body) as Map<String, dynamic>;
 
-    // Common shape: { data: { images: [ { url: ... } ] } }
-    final dynamic data = json['data'];
-    if (data is Map<String, dynamic>) {
-      final dynamic images = data['images'];
-      if (images is List && images.isNotEmpty) {
-        final dynamic first = images.first;
-        if (first is Map<String, dynamic>) {
-          final String? url = first['url'] as String?;
-          if (url != null && url.isNotEmpty) {
-            final http.Response imgResp = await _client.get(Uri.parse(url));
-            if (imgResp.statusCode == 200) {
-              return imgResp.bodyBytes;
-            }
-            throw Exception(
-                'Failed to fetch generated image: HTTP ${imgResp.statusCode}');
+    // nano-banana response shape: { images: [ { url: ... } ] }
+    final dynamic images = json['images'];
+    if (images is List && images.isNotEmpty) {
+      final dynamic first = images.first;
+      if (first is Map<String, dynamic>) {
+        final String? url = first['url'] as String?;
+        if (url != null && url.isNotEmpty) {
+          final http.Response imgResp = await _client.get(Uri.parse(url));
+          if (imgResp.statusCode == 200) {
+            return imgResp.bodyBytes;
           }
+          throw Exception(
+              'Failed to fetch generated image: HTTP ${imgResp.statusCode}');
         }
       }
     }
+    
     // Some fal responses may return image as base64 data url as well
-    final String? imageDataUrl =
-        (data is Map<String, dynamic>) ? data['image'] as String? : null;
+    final String? imageDataUrl = json['image'] as String?;
     if (imageDataUrl != null && imageDataUrl.startsWith('data:')) {
       return _decodeDataUrl(imageDataUrl);
     }
