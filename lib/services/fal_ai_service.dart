@@ -86,6 +86,76 @@ class FalAiService {
     throw Exception('fal.ai response did not contain an image');
   }
 
+  /// Calls fal-ai/image-editing/background-change with a single input image.
+  /// "prompt" can describe the desired background; pass a default like
+  /// "transparent background" or "remove background" for background removal.
+  Future<Uint8List> backgroundChange({
+    required Uint8List inputImageBytes,
+    required String prompt,
+  }) async {
+    final String apiKey = FalConfig.apiKey;
+    if (apiKey.isEmpty) {
+      throw Exception(
+          'FAL_API_KEY is missing. Please configure it securely via server-side proxy');
+    }
+
+    final String mime = _detectMimeType(inputImageBytes);
+    final String dataUrl = 'data:$mime;base64,${base64Encode(inputImageBytes)}';
+
+    final Uri uri = Uri.parse('${FalConfig.baseUrl}/${FalConfig.modelBackgroundChangePath}');
+
+    final Map<String, String> headers = <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': 'Key $apiKey',
+    };
+
+    // Model doc shows input: background prompt and image url(s)
+    final Map<String, dynamic> body = <String, dynamic>{
+      'input': <String, dynamic>{
+        'background_prompt': prompt,
+        'image_urls': <String>[dataUrl],
+        'image': dataUrl,
+      },
+    };
+
+    final http.Response resp = await _client.post(
+      uri,
+      headers: headers,
+      body: jsonEncode(body),
+    );
+
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw Exception('fal.ai error ${resp.statusCode}: ${resp.body}');
+    }
+
+    final Map<String, dynamic> json =
+        jsonDecode(resp.body) as Map<String, dynamic>;
+
+    final dynamic images = json['images'];
+    if (images is List && images.isNotEmpty) {
+      final dynamic first = images.first;
+      if (first is Map<String, dynamic>) {
+        final String? url = first['url'] as String?;
+        if (url != null && url.isNotEmpty) {
+          final http.Response imgResp = await _client.get(Uri.parse(url));
+          if (imgResp.statusCode == 200) {
+            return imgResp.bodyBytes;
+          }
+          throw Exception(
+              'Failed to fetch generated image: HTTP ${imgResp.statusCode}');
+        }
+      }
+    }
+
+    final String? imageDataUrl = json['image'] as String?;
+    if (imageDataUrl != null && imageDataUrl.startsWith('data:')) {
+      return _decodeDataUrl(imageDataUrl);
+    }
+
+    throw Exception('fal.ai response did not contain an image');
+  }
+
   String _detectMimeType(Uint8List bytes) {
     if (bytes.length >= 4) {
       // JPEG

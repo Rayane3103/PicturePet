@@ -38,5 +38,6 @@ class FalConfig {
 
   // REST model paths
   static const String modelNanoBananaEditPath = 'fal-ai/nano-banana/edit';
+  static const String modelBackgroundChangePath = 'fal-ai/image-editing/background-change';
 }
 

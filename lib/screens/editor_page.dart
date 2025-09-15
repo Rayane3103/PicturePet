@@ -795,8 +795,46 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Future<void> _onRemoveBackground() async {
     if (_imageBytes == null) return;
     _pushAiUndo(_imageBytes!);
-    // TODO: Replace with real background removal; keep image centered afterward
-    setState(() {});
+    setState(() {
+      _saving = true;
+    });
+    try {
+      // Use nano-banana with background removal prompt
+      const String defaultPrompt = 'remove background, transparent background, isolated subject';
+      final Uint8List result = await _fal.nanoBananaEdit(
+        inputImageBytes: _imageBytes!,
+        prompt: defaultPrompt,
+      );
+      if (!mounted) return;
+      setState(() {
+        _imageBytes = result;
+        // Keep image centered after replacement (canvas already uses FittedBox.contain)
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Background removal failed: ${e.toString()}';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.redAccent,
+          content: Row(
+            children: [
+              const Icon(Icons.error_outline, color: Colors.white),
+              const SizedBox(width: 8),
+              Expanded(child: Text('Background removal failed', style: const TextStyle(color: Colors.white))),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
   }
 
   Future<void> _onMagicEraser() async {
