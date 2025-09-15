@@ -9,11 +9,11 @@ class FalAiService {
 
   final http.Client _client;
 
-  /// Calls fal-ai/nano-banana/edit with a single input image and prompt.
+  /// Calls fal-ai/ideogram/v3/edit with a single input image and prompt.
   /// Returns the generated image bytes.
   ///
   /// This uses REST via fal.run; all optional params are omitted to use defaults.
-  Future<Uint8List> nanoBananaEdit({
+  Future<Uint8List> ideogramV3Edit({
     required Uint8List inputImageBytes,
     required String prompt,
   }) async {
@@ -26,7 +26,7 @@ class FalAiService {
     final String mime = _detectMimeType(inputImageBytes);
     final String dataUrl = 'data:$mime;base64,${base64Encode(inputImageBytes)}';
 
-    final Uri uri = Uri.parse('${FalConfig.baseUrl}/${FalConfig.modelNanoBananaEditPath}');
+    final Uri uri = Uri.parse('${FalConfig.baseUrl}/${FalConfig.modelIdeogramV3EditPath}');
 
     final Map<String, String> headers = <String, String>{
       'Content-Type': 'application/json',
