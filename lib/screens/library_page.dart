@@ -274,7 +274,7 @@ class _LibraryPageState extends State<LibraryPage> {
                 }
               });
               _pendingDeleteTimers[p.id]?.cancel();
-              _pendingDeleteTimers[p.id] = Timer(const Duration(seconds: 5), () async {
+              _pendingDeleteTimers[p.id] = Timer(const Duration(seconds: 3), () async {
                 try {
                   await _projects.deleteProjectCascade(projectId: p.id);
                 } finally {

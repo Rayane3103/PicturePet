@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/media_item.dart';
 import '../utils/retry.dart';
 import '../utils/logger.dart';
+import 'project_edits_repository.dart';
 
 class MediaRepository {
   MediaRepository({SupabaseClient? client}) : _client = client ?? Supabase.instance.client;
@@ -109,6 +110,19 @@ class MediaRepository {
           }).select('id').single();
           createdProjectId = row['id'] as String;
         });
+        // Create initial history entry for the newly created project
+        try {
+          final editsRepo = ProjectEditsRepository(client: _client);
+          await editsRepo.insert(
+            projectId: createdProjectId!,
+            editName: 'Initial Import',
+            parameters: const {'stage': 'original'},
+            inputImageUrl: url,
+            outputImageUrl: url,
+            creditCost: 0,
+            status: 'completed',
+          );
+        } catch (_) {}
       } catch (e) {
         Logger.warn('Project creation failed', context: {'error': e.toString()});
       }

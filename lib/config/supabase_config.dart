@@ -4,6 +4,7 @@ class SupabaseConfig {
   // Prefer compile-time injection via --dart-define, fallback to .env via flutter_dotenv
   static const String _envUrlDefine = String.fromEnvironment('SUPABASE_URL', defaultValue: '');
   static const String _envAnonDefine = String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
+  static const String _envSessionSecretDefine = String.fromEnvironment('SESSION_SECRET', defaultValue: '');
   static String get _envUrlDotenv {
     try {
       // late import via main.dart
@@ -17,6 +18,14 @@ class SupabaseConfig {
     try {
       // ignore: avoid_dynamic_calls
       return (dotenv.env['SUPABASE_ANON_KEY'] ?? '').toString();
+    } catch (_) {
+      return '';
+    }
+  }
+  static String get _envSessionSecretDotenv {
+    try {
+      // ignore: avoid_dynamic_calls
+      return (dotenv.env['SESSION_SECRET'] ?? '').toString();
     } catch (_) {
       return '';
     }
@@ -36,6 +45,7 @@ class SupabaseConfig {
   // Fallbacks removed; values must come from --dart-define or .env
   static const String _fallbackUrl = '';
   static const String _fallbackAnon = '';
+  static const String _fallbackSessionSecret = '';
 
   // Public getters used by the app
   static String get url {
@@ -47,6 +57,11 @@ class SupabaseConfig {
     if (_envAnonDefine.isNotEmpty) return _envAnonDefine;
     if (_envAnonDotenv.isNotEmpty) return _envAnonDotenv;
     return _fallbackAnon;
+  }
+  static String get sessionSecret {
+    if (_envSessionSecretDefine.isNotEmpty) return _envSessionSecretDefine;
+    if (_envSessionSecretDotenv.isNotEmpty) return _envSessionSecretDotenv;
+    return _fallbackSessionSecret;
   }
 
   // OAuth redirect URL (prefers env; falls back to derived from SUPABASE_URL)
@@ -85,6 +100,7 @@ class SupabaseConfig {
       'SUPABASE_URL': _envUrlDefine.isNotEmpty || _envUrlDotenv.isNotEmpty,
       'SUPABASE_ANON_KEY': _envAnonDefine.isNotEmpty || _envAnonDotenv.isNotEmpty,
       'SUPABASE_REDIRECT_URL': _envRedirectDefine.isNotEmpty || _envRedirectDotenv.isNotEmpty,
+      'SESSION_SECRET': _envSessionSecretDefine.isNotEmpty || _envSessionSecretDotenv.isNotEmpty,
       'ANALYTICS_API_KEY': analyticsApiKey.isNotEmpty,
       'SENTRY_DSN': sentryDsn.isNotEmpty,
     };

@@ -19,7 +19,7 @@ import 'utils/logger.dart';
 import 'screens/media_history_page.dart';
 import 'services/upload_queue_service.dart';
 
-// comment to test the synccccccceedd
+// comment to test the synccccccceedd?test test test
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterError.onError = (details) {
@@ -42,6 +42,10 @@ void main() async {
 
   // Log which secret names are present (never values)
   Logger.info('Secrets status', context: SupabaseConfig.secretsStatus());
+  Logger.info('Supabase init check', context: {
+    'urlProvided': SupabaseConfig.url.isNotEmpty,
+    'anonProvided': SupabaseConfig.anonKey.isNotEmpty,
+  });
   
   runApp(const MediaUsApp());
 }

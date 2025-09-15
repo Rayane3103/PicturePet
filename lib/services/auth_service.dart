@@ -74,11 +74,26 @@ class AuthService {
     required String password,
   }) async {
     try {
-      return await _supabase.auth.signInWithPassword(
+      Logger.info('AuthService: Attempting password sign in', context: {
+        'hasUrl': SupabaseConfig.url.isNotEmpty,
+        'hasAnonKey': SupabaseConfig.anonKey.isNotEmpty,
+      });
+
+      final response = await _supabase.auth.signInWithPassword(
         email: email,
         password: password,
       );
+      Logger.info('AuthService: Sign in response', context: {
+        'hasUser': response.user != null,
+        'hasSession': response.session != null,
+      });
+      return response;
     } catch (e) {
+      Logger.error('AuthService: Sign in error', context: {
+        'error': e.toString(),
+        'hasUrl': SupabaseConfig.url.isNotEmpty,
+        'hasAnonKey': SupabaseConfig.anonKey.isNotEmpty,
+      });
       rethrow;
     }
   }

@@ -7,7 +7,7 @@ class ProjectEditsRepository {
 
   Future<ProjectEdit> insert({
     required String projectId,
-    required int toolId,
+    int? toolId,
     required String editName,
     required Map<String, dynamic> parameters,
     String? inputImageUrl,
@@ -17,7 +17,6 @@ class ProjectEditsRepository {
   }) async {
     final Map<String, dynamic> payload = {
       'project_id': projectId,
-      'tool_id': toolId,
       'edit_name': editName,
       'parameters': parameters,
       'input_image_url': inputImageUrl,
@@ -25,6 +24,9 @@ class ProjectEditsRepository {
       'credit_cost': creditCost,
       'status': status,
     };
+    if (toolId != null) {
+      payload['tool_id'] = toolId;
+    }
 
     final data = await _client.from('project_edits').insert(payload).select().single();
     return ProjectEdit.fromMap(Map<String, dynamic>.from(data));

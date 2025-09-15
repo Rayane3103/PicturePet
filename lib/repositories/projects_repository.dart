@@ -1,5 +1,6 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/projects_events.dart';
+import 'project_edits_repository.dart';
 import '../models/project.dart';
 
 class ProjectsRepository {
@@ -73,7 +74,26 @@ class ProjectsRepository {
         })
         .select()
         .single();
-    return Project.fromMap(Map<String, dynamic>.from(data));
+    final project = Project.fromMap(Map<String, dynamic>.from(data));
+
+    // Insert initial history entry so user can revert to original
+    if (originalImageUrl != null && originalImageUrl.isNotEmpty) {
+      try {
+        final editsRepo = ProjectEditsRepository(client: _client);
+        await editsRepo.insert(
+          projectId: project.id,
+          editName: 'Initial Import',
+          parameters: const {'stage': 'original'},
+          inputImageUrl: originalImageUrl,
+          outputImageUrl: originalImageUrl,
+          creditCost: 0,
+          status: 'completed',
+        );
+      } catch (_) {}
+    }
+
+    ProjectsEvents.instance.notifyChanged();
+    return project;
   }
 
   Future<Project> updateOutputUrl({required String projectId, required String outputImageUrl, String? thumbnailUrl}) async {

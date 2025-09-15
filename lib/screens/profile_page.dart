@@ -1,6 +1,15 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../services/auth_service.dart';
+import '../repositories/projects_repository.dart';
+import '../models/user_profile.dart';
+
+class _ProfileData {
+  const _ProfileData({required this.profile, required this.projectsCount});
+  final UserProfile? profile;
+  final int projectsCount;
+}
 
 class ProfilePage extends StatelessWidget {
   final ThemeMode themeMode;
@@ -8,11 +17,61 @@ class ProfilePage extends StatelessWidget {
 
   const ProfilePage({super.key, required this.themeMode, required this.onModeChanged});
 
+  Future<_ProfileData> _loadProfileData() async {
+    final auth = AuthService();
+    final profile = await auth.fetchCurrentUserProfile();
+    int projectsCount = 0;
+    try {
+      final projects = await ProjectsRepository().list(limit: 1000, offset: 0);
+      projectsCount = projects.length;
+    } catch (_) {}
+    return _ProfileData(profile: profile, projectsCount: projectsCount);
+  }
+
+  String _initialsFor(UserProfile? profile) {
+    String? base = profile?.fullName?.trim();
+    base ??= profile?.username?.trim();
+    base ??= profile?.email?.split('@').first;
+    if (base == null || base.isEmpty) return '?';
+    final parts = base.split(RegExp(r"\s+"));
+    if (parts.length >= 2) {
+      final String a = parts.first;
+      final String b = parts.last;
+      final String first = a.isNotEmpty ? a[0] : '';
+      final String last = b.isNotEmpty ? b[0] : '';
+      return (first + last).toUpperCase();
+    }
+    return base.substring(0, base.length >= 2 ? 2 : 1).toUpperCase();
+  }
+
+  String _membershipLabel(UserProfile? profile) {
+    final tier = profile?.tier.toLowerCase();
+    switch (tier) {
+      case 'pro':
+        return 'Pro Member';
+      case 'premium':
+        return 'Premium Member';
+      case 'free_trial':
+        return 'Free Trial';
+      default:
+        if (tier == null || tier.isEmpty) return 'Member';
+        return tier[0].toUpperCase() + tier.substring(1);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background(context),
-      body: CustomScrollView(
+      body: FutureBuilder<_ProfileData>(
+        future: _loadProfileData(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return Center(child: CircularProgressIndicator(color: AppColors.primaryPurple));
+          }
+          final data = snapshot.data ?? const _ProfileData(profile: null, projectsCount: 0);
+          final profile = data.profile;
+          return CustomScrollView(
         slivers: [
           // Header section
           SliverToBoxAdapter(
@@ -40,7 +99,7 @@ class ProfilePage extends StatelessWidget {
                           ),
                           child: Center(
                             child: Text(
-                              'RM',
+                              _initialsFor(profile),
                               style: GoogleFonts.inter(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w800,
@@ -55,7 +114,7 @@ class ProfilePage extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Rayane Moumine',
+                                profile?.fullName ?? profile?.username ?? 'Anonymous',
                                 style: GoogleFonts.inter(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w800,
@@ -64,7 +123,7 @@ class ProfilePage extends StatelessWidget {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                'rayane@mediapet.com',
+                                profile?.email ?? '',
                                 style: GoogleFonts.inter(
                                   color: Colors.white.withOpacity(0.9),
                                   fontSize: 16,
@@ -78,7 +137,7 @@ class ProfilePage extends StatelessWidget {
                                   borderRadius: BorderRadius.circular(16),
                                 ),
                                 child: Text(
-                                  'Premium Member',
+                                  _membershipLabel(profile),
                                   style: GoogleFonts.inter(
                                     color: Colors.white,
                                     fontWeight: FontWeight.w600,
@@ -124,7 +183,7 @@ class ProfilePage extends StatelessWidget {
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                '24',
+                                data.projectsCount.toString(),
                                 style: GoogleFonts.inter(
                                   color: AppColors.onBackground(context),
                                   fontSize: 28,
@@ -159,7 +218,7 @@ class ProfilePage extends StatelessWidget {
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                '9,625',
+                                (profile?.credits ?? 0).toString(),
                                 style: GoogleFonts.inter(
                                   color: AppColors.onBackground(context),
                                   fontSize: 28,
@@ -395,6 +454,8 @@ class ProfilePage extends StatelessWidget {
             ),
           ),
         ],
+      );
+        },
       ),
     );
   }
