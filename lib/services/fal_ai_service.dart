@@ -19,7 +19,7 @@ class FalAiService {
   }) async {
     final String apiKey = FalConfig.apiKey;
     if (apiKey.isEmpty) {
-      throw Exception('FAL_KEY is missing. Provide it via --dart-define or .env');
+      throw Exception('FAL_API_KEY is missing. Please configure it securely via server-side proxy');
     }
 
     // Build data URL for the input image. Try to sniff type from header bytes; fallback to jpeg.

@@ -2,12 +2,12 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Configuration for accessing the fal.ai APIs.
 class FalConfig {
-  // API key from --dart-define or .env (FAL_KEY)
-  static const String _apiKeyDefine = String.fromEnvironment('FAL_KEY', defaultValue: '');
+  // API key from --dart-define or .env (FAL_API_KEY)
+  static const String _apiKeyDefine = String.fromEnvironment('FAL_API_KEY', defaultValue: '');
   static String get _apiKeyDotenv {
     try {
       // ignore: avoid_dynamic_calls
-      return (dotenv.env['FAL_KEY'] ?? '').toString();
+      return (dotenv.env['FAL_API_KEY'] ?? '').toString();
     } catch (_) {
       return '';
     }

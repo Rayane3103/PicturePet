@@ -22,29 +22,17 @@ args = "flutter-web"
 name = "flutter-web"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "flutter run -d web-server --release --web-hostname 0.0.0.0 --web-port 5000 --dart-define=SUPABASE_URL=$SUPABASE_URL --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY --dart-define=SESSION_SECRET=$SESSION_SECRET"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "flutter run -d web-server --release --web-hostname 0.0.0.0 --web-port 5000 --dart-define=SUPABASE_URL=$SUPABASE_URL --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY --dart-define=SESSION_SECRET=$SESSION_SECRET --dart-define=FAL_API_KEY=$FAL_API_KEY"
+waitForPort = 5000
 
 [[ports]]
 localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 8080
-externalPort = 8080
-
-[[ports]]
-localPort = 32961
-externalPort = 3001
-
-[[ports]]
-localPort = 34793
-externalPort = 3000
 
 [deployment]
 deploymentTarget = "autoscale"
