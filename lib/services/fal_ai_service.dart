@@ -26,7 +26,7 @@ class FalAiService {
     final String mime = _detectMimeType(inputImageBytes);
     final String dataUrl = 'data:$mime;base64,${base64Encode(inputImageBytes)}';
 
-    final Uri uri = Uri.parse('${FalConfig.baseUrl}/fal/${FalConfig.modelNanoBananaEditPath}');
+    final Uri uri = Uri.parse('${FalConfig.baseUrl}/${FalConfig.modelNanoBananaEditPath}');
 
     final Map<String, String> headers = <String, String>{
       'Content-Type': 'application/json',
