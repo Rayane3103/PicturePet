@@ -41,6 +41,16 @@ class ProjectEditsRepository {
         .range(offset, offset + limit - 1);
     return List<Map<String, dynamic>>.from(rows).map(ProjectEdit.fromMap).toList();
   }
+
+  Future<bool> hasInitialImport(String projectId) async {
+    final List rows = await _client
+        .from('project_edits')
+        .select('id')
+        .eq('project_id', projectId)
+        .eq('edit_name', 'Initial Import')
+        .limit(1);
+    return rows.isNotEmpty;
+  }
 }
 
 

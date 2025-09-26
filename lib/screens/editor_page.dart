@@ -6,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:pro_image_editor/pro_image_editor.dart';
+import 'dart:async';
 import 'package:image/image.dart' as img;
 import '../repositories/media_repository.dart';
 import '../repositories/projects_repository.dart';
@@ -17,8 +18,13 @@ import 'package:url_launcher/url_launcher.dart';
 import '../repositories/tools_repository.dart';
 import '../services/projects_events.dart';
 import '../services/fal_ai_service.dart';
-
-enum _AiTool { none, nanoBanana }
+import '../services/ai_jobs_service.dart';
+import '../repositories/ai_jobs_repository.dart';
+import '../services/media_pipeline_service.dart';
+import '../models/ai_job.dart';
+import '../models/media_item.dart';
+import 'reframe_presets.dart';
+import '../utils/logger.dart';
 
 class _AllowAllScrollBehavior extends ScrollBehavior {
   const _AllowAllScrollBehavior();
@@ -30,6 +36,23 @@ class _AllowAllScrollBehavior extends ScrollBehavior {
         PointerDeviceKind.stylus,
         PointerDeviceKind.unknown,
       };
+}
+
+class _AiActionMeta {
+  final String toolIdName;
+  final String editName;
+  final Map<String, dynamic> parameters;
+  const _AiActionMeta({
+    required this.toolIdName,
+    required this.editName,
+    this.parameters = const {},
+  });
+}
+
+class _AiSnapshot {
+  final Uint8List bytes;
+  final _AiActionMeta? actionMeta;
+  const _AiSnapshot({required this.bytes, this.actionMeta});
 }
 
 class EditorPage extends StatefulWidget {
@@ -54,23 +77,35 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   final ProjectEditsRepository _editsRepo = ProjectEditsRepository();
   final ToolsRepository _toolsRepo = ToolsRepository();
   String? _originalOrLastUrl;
+  // Legacy direct AI client retained for potential future use
+  // ignore: unused_field
   final FalAiService _fal = FalAiService();
+  final AiJobsRepository _aiJobsRepo = AiJobsRepository();
+  StreamSubscription<AiJob>? _jobUpdatesSub;
+  // Track active AI jobs and dialog state for live updates
+  final Set<String> _activeJobIds = <String>{};
+  String? _currentNanoJobId;
+  bool _showNanoPanel = false;
+
+  // AI tools row scroll hint state
+  final ScrollController _aiToolsScrollController = ScrollController();
+  bool _aiCanScrollLeft = false;
+  bool _aiCanScrollRight = false;
 
   // AI session state
   Uint8List? _aiSessionStartBytes;
-  final List<Uint8List> _aiUndoStack = <Uint8List>[];
-  final List<Uint8List> _aiRedoStack = <Uint8List>[];
+  final List<_AiSnapshot> _aiUndoStack = <_AiSnapshot>[];
+  final List<_AiSnapshot> _aiRedoStack = <_AiSnapshot>[];
+  _AiActionMeta? _lastAiAction;
 
   // Bottom tabs sizing (to align AI toolbar exactly above it)
   final GlobalKey _bottomTabsKey = GlobalKey();
-  double? _bottomTabsHeight;
 
   // nano_banana UI state
   final TextEditingController _nanoPromptController = TextEditingController();
   Uint8List? _nanoResultBytes;
   bool _nanoIsGenerating = false;
   String? _nanoError;
-  _AiTool _activeAiTool = _AiTool.none;
 
   @override
   void initState() {
@@ -79,11 +114,14 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       // Handle AI session lifecycle when switching tabs
       if (_tabController.index == 1) {
         _ensureAiSessionStarted();
+        // Update scroll hints when switching into AI tab
+        WidgetsBinding.instance.addPostFrameCallback((_) => _updateAiScrollHints());
       } else {
         _endAiSessionIfInactive();
       }
       setState(() {});
     });
+    _aiToolsScrollController.addListener(_updateAiScrollHints);
     _initProjectAndLoad();
   }
 
@@ -95,6 +133,90 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     try {
       final project = await _projectsRepo.getById(widget.projectId);
       if (project == null) throw Exception('Project not found');
+      // Subscribe to AI job updates for this project
+      AiJobsService.instance.subscribeToProjectJobs(project.id);
+      _jobUpdatesSub?.cancel();
+      _jobUpdatesSub = AiJobsService.instance.jobUpdates.listen((AiJob job) async {
+        if (job.projectId != widget.projectId) return;
+        // Clear global overlay for tracked jobs on completion/failure
+        if (_activeJobIds.contains(job.id) &&
+            (job.status == 'completed' || job.status == 'failed' || job.status == 'cancelled')) {
+          if (mounted) {
+            setState(() {
+              _activeJobIds.remove(job.id);
+              // Ensure global overlay hides when no active jobs remain
+              _saving = _activeJobIds.isNotEmpty;
+            });
+          }
+        }
+        if (job.status == 'completed' && job.resultUrl != null) {
+          try {
+            if (job.toolName == 'nano_banana') {
+              final Uri uri = Uri.parse(job.resultUrl!);
+              final http.Response resp = await http.get(uri);
+              if (resp.statusCode == 200 && resp.bodyBytes.isNotEmpty) {
+                if (!mounted) return;
+                setState(() {
+                  _nanoResultBytes = resp.bodyBytes;
+                  if (_currentNanoJobId == job.id) {
+                    _nanoIsGenerating = false;
+                  }
+                });
+                // Inline panel is bound to state; no dialog refresh needed
+              }
+            } else {
+              _originalOrLastUrl = job.resultUrl;
+              await _loadAndDownscaleImage(job.resultUrl!);
+              if (!mounted) return;
+              // Best-effort: hide overlay once applied
+              setState(() { _saving = _activeJobIds.isNotEmpty; });
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(behavior: SnackBarBehavior.floating, content: Text('AI result applied')),
+              );
+              // Notify library/list views to refresh thumbnails
+              ProjectsEvents.instance.notifyChanged();
+            }
+          } catch (e) {
+            Logger.warn('Failed to apply AI job result', context: {'error': e.toString()});
+          }
+        } else if (job.status == 'failed') {
+          // Print detailed error to console for easy copy/paste
+          Logger.error('AI job failed', context: {
+            'job_id': job.id,
+            'tool': job.toolName,
+            'error': job.error ?? 'unknown',
+            'payload': job.payload,
+            'input_image_url': job.inputImageUrl,
+            'project_id': job.projectId,
+          });
+          if (_currentNanoJobId == job.id && mounted) setState(() { _nanoIsGenerating = false; });
+          if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              behavior: SnackBarBehavior.floating,
+              backgroundColor: Colors.redAccent,
+              content: Text('AI job failed${job.error != null ? ': ${job.error}' : ''}', style: const TextStyle(color: Colors.white)),
+            ),
+          );
+        }
+      });
+      // Ensure an initial history entry exists for the original image
+      try {
+        final bool hasInitial = await _editsRepo.hasInitialImport(project.id);
+        final String? originalUrl = project.originalImageUrl;
+        if (!hasInitial && originalUrl != null && originalUrl.isNotEmpty) {
+          await _editsRepo.insert(
+            projectId: project.id,
+            editName: 'Initial Import',
+            parameters: const {'stage': 'original'},
+            inputImageUrl: originalUrl,
+            outputImageUrl: originalUrl,
+            creditCost: 0,
+            status: 'completed',
+          );
+        }
+      } catch (_) {}
       _originalOrLastUrl = project.outputImageUrl ?? project.originalImageUrl;
       if (_originalOrLastUrl == null) throw Exception('Project has no image URL');
       await _loadAndDownscaleImage(_originalOrLastUrl!);
@@ -150,6 +272,10 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   void dispose() {
     _tabController.dispose();
     _nanoPromptController.dispose();
+    _aiToolsScrollController.dispose();
+    _currentNanoJobId = null;
+    _jobUpdatesSub?.cancel();
+    AiJobsService.instance.unsubscribe();
     super.dispose();
   }
 
@@ -158,13 +284,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     return Scaffold(
       appBar: AppBar(
         title: const Text('Editor'),
-        actions: [
-          IconButton(
-            tooltip: 'Versions',
-            icon: const Icon(Icons.history_rounded),
-            onPressed: _openVersions,
-          ),
-        ],
+        actions: _buildAppBarActions(),
       ),
       backgroundColor: AppColors.background(context),
       body: Stack(
@@ -172,8 +292,8 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
           Positioned.fill(
             child: _buildImage(),
           ),
-          _buildAiBottomOverlay(),
-          if (_saving)
+          // Keep overlay visible while saving OR while any tracked background job is active
+          if (_saving || _activeJobIds.isNotEmpty)
             Positioned.fill(
               child: Container(
                 color: Colors.black.withOpacity(0.35),
@@ -189,63 +309,247 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     );
   }
 
+  List<Widget> _buildAppBarActions() {
+    // Always show Versions; show AI controls only on AI tab
+    if (_tabController.index == 1) {
+      return [
+        IconButton(
+          tooltip: 'Undo',
+          icon: const Icon(Icons.undo),
+          onPressed: _canAiUndo ? _aiUndo : null,
+        ),
+        IconButton(
+          tooltip: 'Redo',
+          icon: const Icon(Icons.redo),
+          onPressed: _canAiRedo ? _aiRedo : null,
+        ),
+        TextButton(
+          onPressed: _aiSessionStartBytes == null ? null : _aiCancel,
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: _imageBytes == null ? null : _aiSave,
+          child: const Text('Save'),
+        ),
+        IconButton(
+          tooltip: 'Versions',
+          icon: const Icon(Icons.history_rounded),
+          onPressed: _openVersions,
+        ),
+      ];
+    } else {
+      return [
+        IconButton(
+          tooltip: 'Versions',
+          icon: const Icon(Icons.history_rounded),
+          onPressed: _openVersions,
+        ),
+      ];
+    }
+  }
+
   Widget _buildBottomTabs() {
-    return Container(
-      key: _bottomTabsKey,
-      decoration: BoxDecoration(
-        color: AppColors.card(context).withOpacity(0.85),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 20,
-            offset: const Offset(0, 8),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Transparent chips row above the TabBar
+        if (_tabController.index == 1)
+          SizedBox(
+            height: 75,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Stack(
+                children: [
+                  ScrollConfiguration(
+                    behavior: const _AllowAllScrollBehavior(),
+                    child: ListView(
+                      controller: _aiToolsScrollController,
+                      scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
+                      children: [
+                        _aiChip(Icons.remove_circle_outline, 'BG Remove', _onRemoveBackground),
+                        const SizedBox(width: 8),
+                        _aiChip(Icons.bolt_rounded, _showNanoPanel ? 'Hide Remix' : 'Remix', () {
+                          setState(() {
+                            _showNanoPanel = !_showNanoPanel;
+                          });
+                        }),
+                        const SizedBox(width: 8),
+                        _aiChip(Icons.autorenew_rounded, 'Reframe', _onIdeogramReframe),
+                        const SizedBox(width: 8),
+                        _aiChip(Icons.widgets_rounded, 'Elements', _onElementsRemix),
+                        const SizedBox(width: 8),
+                        _aiChip(Icons.auto_fix_high_rounded, 'Style', _onStyleTransform),
+                        const SizedBox(width: 8),
+                        // _aiChip(Icons.auto_fix_high_rounded, 'Smart Edit', _onIdeogramEdit),
+                        // const SizedBox(width: 8),
+                        _aiChip(Icons.person_rounded, 'Character', _onIdeogramCharacterEdit),
+                        const SizedBox(width: 8),
+                        
+                        
+                        _aiChip(Icons.text_fields_rounded, 'Text Edit', _onCalligrapher),
+                        
+                      ],
+                    ),
+                  ),
+                  // Left fade hint
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    bottom: 0,
+                    child: IgnorePointer(
+                      ignoring: true,
+                      child: AnimatedOpacity(
+                        opacity: _aiCanScrollLeft ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 180),
+                        child: Container(
+                          width: 16,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.centerLeft,
+                              end: Alignment.centerRight,
+                              colors: [
+                                AppColors.background(context),
+                                AppColors.background(context).withOpacity(0.0),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Right fade hint
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    bottom: 0,
+                    child: IgnorePointer(
+                      ignoring: true,
+                      child: AnimatedOpacity(
+                        opacity: _aiCanScrollRight ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 180),
+                        child: Container(
+                          width: 16,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.centerRight,
+                              end: Alignment.centerLeft,
+                              colors: [
+                                AppColors.background(context),
+                                AppColors.background(context).withOpacity(0.0),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Right chevron hint
+                  Positioned(
+                    right: 4,
+                    top: 0,
+                    bottom: 0,
+                    child: IgnorePointer(
+                      ignoring: true,
+                      child: AnimatedOpacity(
+                        opacity: _aiCanScrollRight ? 0.7 : 0.0,
+                        duration: const Duration(milliseconds: 200),
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: Icon(
+                            Icons.chevron_right_rounded,
+                            size: 18,
+                            color: AppColors.onBackground(context).withOpacity(0.6),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
-        border: Border.all(
-          color: AppColors.muted(context).withOpacity(0.25),
-          width: 1,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Container(
+        Container(
+          key: _bottomTabsKey,
           decoration: BoxDecoration(
-            color: AppColors.muted(context).withOpacity(0.6),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: TabBar(
-            controller: _tabController,
-            labelColor: Colors.white,
-            unselectedLabelColor: AppColors.secondaryText(context),
-            indicator: BoxDecoration(
-              gradient: AppGradients.primary,
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.primaryPurple.withOpacity(0.4),
-                  blurRadius: 8,
-                  offset: const Offset(0, 3),
-                ),
-              ],
-            ),
-            labelStyle: GoogleFonts.inter(
-              fontWeight: FontWeight.w700,
-              fontSize: 14,
-            ),
-            unselectedLabelStyle: GoogleFonts.inter(
-              fontWeight: FontWeight.w500,
-              fontSize: 14,
-            ),
-            indicatorSize: TabBarIndicatorSize.tab,
-            tabs: const [
-              Tab(text: 'Manual'),
-              Tab(text: 'AI'),
+            color: AppColors.card(context).withOpacity(0.85),
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
+              ),
             ],
+            border: Border.all(
+              color: AppColors.muted(context).withOpacity(0.25),
+              width: 1,
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Container(
+              decoration: BoxDecoration(
+                color: AppColors.muted(context).withOpacity(0.6),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: TabBar(
+                controller: _tabController,
+                labelColor: Colors.white,
+                unselectedLabelColor: AppColors.secondaryText(context),
+                indicator: BoxDecoration(
+                  gradient: AppGradients.primary,
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primaryPurple.withOpacity(0.4),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                labelStyle: GoogleFonts.inter(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
+                unselectedLabelStyle: GoogleFonts.inter(
+                  fontWeight: FontWeight.w500,
+                  fontSize: 14,
+                ),
+                indicatorSize: TabBarIndicatorSize.tab,
+                tabs: const [
+                  Tab(text: 'Manual'),
+                  Tab(text: 'AI'),
+                ],
+              ),
+            ),
           ),
         ),
-      ),
+      ],
     );
+  }
+
+  void _updateAiScrollHints() {
+    if (!_aiToolsScrollController.hasClients) {
+      if (_aiCanScrollLeft || _aiCanScrollRight) {
+        setState(() {
+          _aiCanScrollLeft = false;
+          _aiCanScrollRight = false;
+        });
+      }
+      return;
+    }
+    final position = _aiToolsScrollController.position;
+    final double offset = position.pixels;
+    final double max = position.maxScrollExtent;
+    final bool canLeft = offset > 2.0;
+    final bool canRight = (max - offset) > 2.0;
+    if (canLeft != _aiCanScrollLeft || canRight != _aiCanScrollRight) {
+      setState(() {
+        _aiCanScrollLeft = canLeft;
+        _aiCanScrollRight = canRight;
+      });
+    }
   }
 
   Widget _buildImage() {
@@ -350,10 +654,135 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
 
   Widget _buildAiImageCanvas() {
     // Centered, contain-fit image canvas for AI tab
-    return SizedBox.expand(
-      child: FittedBox(
-        fit: BoxFit.contain,
-        child: Image.memory(_imageBytes!, filterQuality: FilterQuality.high),
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: FittedBox(
+            fit: BoxFit.contain,
+            child: Image.memory(_imageBytes!, filterQuality: FilterQuality.high),
+          ),
+        ),
+        if (_showNanoPanel)
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 12,
+            child: _buildNanoInlinePanel(),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildNanoInlinePanel() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.card(context).withOpacity(0.95),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.muted(context).withOpacity(0.2), width: 1),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 20, offset: const Offset(0, 8)),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.auto_awesome_rounded, color: AppColors.onBackground(context)),
+              const SizedBox(width: 8),
+              Text('Remix', style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 14, color: AppColors.onBackground(context))),
+              const Spacer(),
+              IconButton(
+                tooltip: 'Close',
+                icon: const Icon(Icons.close_rounded),
+                onPressed: () {
+                  setState(() {
+                    _showNanoPanel = false;
+                    _nanoError = null;
+                  });
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              color: AppColors.card(context),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.muted(context).withOpacity(0.3), width: 1),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: TextField(
+                controller: _nanoPromptController,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) async {
+                  if (_nanoIsGenerating) return;
+                  setState(() { _currentNanoJobId = null; _nanoIsGenerating = true; _nanoError = null; });
+                  try {
+                    await _handleNanoGenerate();
+                  } finally {
+                    if (mounted && (_currentNanoJobId == null || _currentNanoJobId!.isEmpty)) {
+                      setState(() { _nanoIsGenerating = false; });
+                    }
+                  }
+                },
+                decoration: InputDecoration(
+                  border: InputBorder.none,
+                  hintText: 'Describe the style or transformation…',
+                  hintStyle: GoogleFonts.inter(color: AppColors.secondaryText(context)),
+                ),
+                style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+          if (_nanoError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_nanoError!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
+            ),
+          const SizedBox(height: 10),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _nanoIsGenerating ? null : () async {
+                    setState(() { _currentNanoJobId = null; _nanoIsGenerating = true; _nanoError = null; });
+                    try {
+                      await _handleNanoGenerate();
+                    } finally {
+                      if (mounted && (_currentNanoJobId == null || _currentNanoJobId!.isEmpty)) {
+                        setState(() { _nanoIsGenerating = false; });
+                      }
+                    }
+                  },
+                  icon: _nanoIsGenerating
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.auto_awesome_rounded),
+                  label: Text(_nanoIsGenerating ? 'Generating…' : (_nanoResultBytes != null ? 'Regenerate' : 'Generate')),
+                ),
+                const SizedBox(width: 8),
+                if (_nanoResultBytes != null) ...[
+                  OutlinedButton.icon(
+                    onPressed: _saving ? null : () async {
+                      await _handleNanoSaveResultOnly();
+                    },
+                    icon: const Icon(Icons.save_alt_rounded),
+                    label: const Text('Save Result'),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 180,
+            child: _buildNanoResultCard(),
+          ),
+        ],
       ),
     );
   }
@@ -361,6 +790,8 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Future<void> _openVersions() async {
     try {
       final edits = await _editsRepo.listForProject(widget.projectId, limit: 50);
+      final project = await _projectsRepo.getById(widget.projectId);
+      final String? originalUrl = project?.originalImageUrl;
       if (!mounted) return;
       // ignore: use_build_context_synchronously
       await showModalBottomSheet(
@@ -370,9 +801,44 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         builder: (_) {
           return SafeArea(
             child: ListView.builder(
-              itemCount: edits.length,
+              itemCount: edits.length + ((originalUrl != null && originalUrl.isNotEmpty) ? 1 : 0),
               itemBuilder: (ctx, i) {
-                final e = edits[i];
+                final bool hasOriginal = originalUrl != null && originalUrl.isNotEmpty;
+                if (hasOriginal && i == 0) {
+                  // Pinned original image entry
+                  return ListTile(
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.network(
+                        originalUrl,
+                        width: 48,
+                        height: 48,
+                        fit: BoxFit.cover,
+                        errorBuilder: (c, err, st) => Container(
+                          width: 48,
+                          height: 48,
+                          color: AppColors.muted(context),
+                          child: Icon(Icons.image_outlined, color: AppColors.secondaryText(context), size: 20),
+                        ),
+                      ),
+                    ),
+                    title: Text('Original image', style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w700)),
+                    subtitle: Text('Pinned', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12)),
+                    trailing: const Icon(Icons.push_pin, size: 18),
+                    onTap: () async {
+                      Navigator.of(ctx).pop();
+                      setState(() {
+                        _originalOrLastUrl = originalUrl;
+                        _loading = true;
+                        _error = null;
+                      });
+                      await _loadAndDownscaleImage(originalUrl);
+                    },
+                  );
+                }
+
+                final int idx = hasOriginal ? i - 1 : i;
+                final e = edits[idx];
                 final thumbUrl = e.outputImageUrl ?? e.inputImageUrl;
                 return ListTile(
                   leading: ClipRRect(
@@ -455,7 +921,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       } catch (_) {}
 
       // Log edit entry with required tool_id
-      final manualToolId = await _toolsRepo.getToolIdByName(toolIdName);
+      final int? manualToolId = await _toolsRepo.getToolIdByName(toolIdName);
       await _editsRepo.insert(
         projectId: updated.id,
         toolId: manualToolId,
@@ -519,199 +985,35 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     );
   }
 
-  Widget _buildAiBottomOverlay() {
-    final bool show = _tabController.index == 1;
-    final bool isNanoPanel = _activeAiTool == _AiTool.nanoBanana;
-    final double barHeight = isNanoPanel ? 360 : 136;
-    // Measure bottom tabs height after layout to align precisely above it
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final ctx = _bottomTabsKey.currentContext;
-      if (ctx != null) {
-        final size = (ctx.findRenderObject() as RenderBox?)?.size;
-        if (size != null && size.height != _bottomTabsHeight) {
-          setState(() {
-            _bottomTabsHeight = size.height;
-          });
-        }
-      }
-    });
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOut,
-      left: 0,
-      right: 0,
-      bottom: show ? ((_bottomTabsHeight ?? 96) + 4) : -barHeight,
-      height: barHeight,
-      child: IgnorePointer(
-        ignoring: !show,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 920),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-          child: Container(
-            decoration: BoxDecoration(
-                      color: AppColors.card(context).withOpacity(0.9),
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.08),
-                  blurRadius: 20,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-              border: Border.all(color: AppColors.muted(context).withOpacity(0.2), width: 1),
-            ),
-            child: Stack(
-              children: [
-                Column(
-                  children: [
-                            const SizedBox(height: 6),
-                            // Handle
-                            Container(
-                              width: 36,
-                              height: 4,
-                              decoration: BoxDecoration(
-                                color: AppColors.muted(context).withOpacity(0.6),
-                                borderRadius: BorderRadius.circular(2),
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Expanded(
-                              child: AnimatedSwitcher(
-                                duration: const Duration(milliseconds: 200),
-                                switchInCurve: Curves.easeOut,
-                                switchOutCurve: Curves.easeIn,
-                                child: !isNanoPanel
-                                    ? _buildAiChipsContent()
-                                    : _buildNanoBananaPanel(),
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_saving)
-                          Positioned.fill(
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.35),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              child: const Center(child: CircularProgressIndicator()),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAiChipsContent() {
-    return Column(
-      children: [
-        // Controls row
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                      child: Row(
-                        children: [
-                          IconButton(
-                            tooltip: 'Undo',
-                            icon: Icon(Icons.undo, color: AppColors.onBackground(context)),
-                            onPressed: _canAiUndo ? _aiUndo : null,
-                          ),
-                          IconButton(
-                            tooltip: 'Redo',
-                            icon: Icon(Icons.redo, color: AppColors.onBackground(context)),
-                            onPressed: _canAiRedo ? _aiRedo : null,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.auto_awesome_rounded, size: 16, color: AppColors.onBackground(context)),
-                    const SizedBox(width: 6),
-                    Text(
-                              'AI Tools',
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.inter(
-                                color: AppColors.onBackground(context),
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13,
-                              ),
-                    ),
-                  ],
-                            ),
-                          ),
-                          OutlinedButton(
-                            onPressed: _aiCancel,
-                            child: const Text('Cancel'),
-                          ),
-                          const SizedBox(width: 8),
-                          ElevatedButton(
-                            onPressed: _imageBytes == null ? null : _aiSave,
-                            child: const Text('Save'),
-                          ),
-                        ],
-                      ),
-                    ),
-        SizedBox(
-          height: 56,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-            child: ScrollConfiguration(
-              behavior: const _AllowAllScrollBehavior(),
-              child: ListView(
-                          scrollDirection: Axis.horizontal,
-                physics: const BouncingScrollPhysics(),
-                            children: [
-                              _aiChip(Icons.remove_circle_outline, 'Remove background', _onRemoveBackground),
-                              const SizedBox(width: 8),
-                              _aiChip(Icons.brush_outlined, 'Magic eraser', _onMagicEraser),
-                              const SizedBox(width: 8),
-                              _aiChip(Icons.auto_fix_high_rounded, 'AI Style', _onStyleTransform),
-                              const SizedBox(width: 8),
-                              _aiChip(Icons.auto_fix_high_rounded, 'ideogram/v3/edit', _onIdeogramEdit),
-                              const SizedBox(width: 8),
-                              _aiChip(Icons.person_rounded, 'ideogram/character_edit', _onIdeogramCharacterEdit),
-                              const SizedBox(width: 8),
-                              _aiChip(Icons.autorenew_rounded, 'ideogram/v3/reframe', _onIdeogramReframe),
-                              const SizedBox(width: 8),
-                              _aiChip(Icons.bolt_rounded, 'nano-banana', _onNanoBanana),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-    );
-  }
-
   Widget _aiChip(IconData icon, String label, VoidCallback onPressed) {
     return SizedBox(
-      height: 44,
-      child: ElevatedButton.icon(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.card(context),
-          foregroundColor: AppColors.onBackground(context),
-          elevation: 0,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ),
-        onPressed: onPressed,
-        icon: Icon(icon, size: 18),
-        label: Text(
-          label,
-          style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13),
+      width: 80,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onPressed,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 22, color: Colors.white),
+                const SizedBox(height: 6),
+                Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -739,46 +1041,59 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     _aiUndoStack.clear();
     _aiRedoStack.clear();
     // Reset nano_banana panel state when session resets
-    _activeAiTool = _AiTool.none;
     _nanoResultBytes = null;
     _nanoIsGenerating = false;
     _nanoError = null;
     _nanoPromptController.clear();
+    _lastAiAction = null;
   }
 
   void _pushAiUndo(Uint8List current) {
-    _aiUndoStack.add(Uint8List.fromList(current));
+    // Establish session start on first change if needed
+    _aiSessionStartBytes ??= Uint8List.fromList(current);
+    _aiUndoStack.add(
+      _AiSnapshot(bytes: Uint8List.fromList(current), actionMeta: _lastAiAction),
+    );
     _aiRedoStack.clear();
   }
 
   void _aiUndo() {
     if (!_canAiUndo || _imageBytes == null) return;
-    final Uint8List last = _aiUndoStack.removeLast();
-    _aiRedoStack.add(Uint8List.fromList(_imageBytes!));
+    final _AiSnapshot previous = _aiUndoStack.removeLast();
+    _aiRedoStack.add(
+      _AiSnapshot(bytes: Uint8List.fromList(_imageBytes!), actionMeta: _lastAiAction),
+    );
     setState(() {
-      _imageBytes = last;
+      _imageBytes = previous.bytes;
+      _lastAiAction = previous.actionMeta;
     });
   }
 
   void _aiRedo() {
     if (!_canAiRedo || _imageBytes == null) return;
-    final Uint8List next = _aiRedoStack.removeLast();
-    _aiUndoStack.add(Uint8List.fromList(_imageBytes!));
+    final _AiSnapshot next = _aiRedoStack.removeLast();
+    _aiUndoStack.add(
+      _AiSnapshot(bytes: Uint8List.fromList(_imageBytes!), actionMeta: _lastAiAction),
+    );
     setState(() {
-      _imageBytes = next;
+      _imageBytes = next.bytes;
+      _lastAiAction = next.actionMeta;
     });
   }
 
   Future<void> _aiSave() async {
     if (_imageBytes == null) return;
+    final _AiActionMeta? action = _lastAiAction;
     await _handleSave(
       _imageBytes!,
       source: 'ai',
-      toolIdName: 'ai_editor',
-      editName: 'AI Editor',
+      toolIdName: action?.toolIdName ?? 'ai_editor',
+      editName: action?.editName ?? 'AI Editor',
       parameters: {
         'editor': 'AI',
-        'notes': 'Exported from AI tab',
+        if (action != null) ...action.parameters,
+        'undo_stack_size': _aiUndoStack.length,
+        'redo_stack_size': _aiRedoStack.length,
       },
     );
   }
@@ -795,186 +1110,477 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Future<void> _onRemoveBackground() async {
     if (_imageBytes == null) return;
     _pushAiUndo(_imageBytes!);
+    const String defaultPrompt = 'remove background make it transparent background not white, isolated subject';
+    _lastAiAction = const _AiActionMeta(
+      toolIdName: 'remove_background',
+      editName: 'Remove Background',
+      parameters: {
+        'tool': 'remove_background',
+        'model': 'nano_banana',
+        'notes': 'AI background removal',
+        'prompt': defaultPrompt,
+      },
+    );
     setState(() {
-      _saving = true;
+      _saving = true; // Show overlay until we confirm realtime subscription is active
     });
     try {
-      // Use nano-banana with background removal prompt
-      const String defaultPrompt = 'remove background, transparent background, isolated subject';
-      final Uint8List result = await _fal.nanoBananaEdit(
-        inputImageBytes: _imageBytes!,
-        prompt: defaultPrompt,
+      // Enqueue background job; result handled via Realtime when Edge Function completes
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'remove_background',
+        payload: const {
+          'prompt': defaultPrompt,
+        },
+        inputImageUrl: _originalOrLastUrl,
       );
+      // Track this job to keep loader visible until it completes
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      // Trigger processing on Edge Function (runs in background)
+      await AiJobsService.instance.triggerProcessing(job.id);
       if (!mounted) return;
-      setState(() {
-        _imageBytes = result;
-        // Keep image centered after replacement (canvas already uses FittedBox.contain)
-      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          behavior: SnackBarBehavior.floating,
+          content: Text('Background job queued'),
+          duration: Duration(seconds: 2),
+        ),
+      );
     } catch (e) {
+      Logger.error('Queueing AI background removal failed', context: {
+        'error': e.toString(),
+      });
       if (!mounted) return;
       setState(() {
-        _error = 'Background removal failed: ${e.toString()}';
+        _error = 'Failed to start job: ${e.toString()}';
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           behavior: SnackBarBehavior.floating,
           backgroundColor: Colors.redAccent,
-          content: Row(
-            children: [
-              const Icon(Icons.error_outline, color: Colors.white),
-              const SizedBox(width: 8),
-              Expanded(child: Text('Background removal failed', style: const TextStyle(color: Colors.white))),
-            ],
-          ),
+          content: Text('Failed to start AI job', style: TextStyle(color: Colors.white)),
         ),
       );
     } finally {
       if (mounted) {
+        // Keep overlay if there are active jobs; otherwise hide
         setState(() {
-          _saving = false;
+          _saving = _activeJobIds.isNotEmpty;
         });
       }
     }
   }
 
-  Future<void> _onMagicEraser() async {
-    if (_imageBytes == null) return;
-    _pushAiUndo(_imageBytes!);
-    // TODO: Implement magic eraser
-    setState(() {});
-  }
+  
 
   Future<void> _onStyleTransform() async {
     if (_imageBytes == null) return;
     _pushAiUndo(_imageBytes!);
+    _lastAiAction = const _AiActionMeta(
+      toolIdName: 'ai_style',
+      editName: 'AI Style Transform',
+      parameters: {
+        'tool': 'ai_style',
+      },
+    );
     // TODO: Implement style transform
     setState(() {});
   }
 
+  // ignore: unused_element
   Future<void> _onIdeogramEdit() async {
     if (_imageBytes == null) return;
     _pushAiUndo(_imageBytes!);
+    _lastAiAction = const _AiActionMeta(
+      toolIdName: 'ideogram_v3_edit',
+      editName: 'ideogram/v3/edit',
+      parameters: {
+        'tool': 'ideogram_v3_edit',
+      },
+    );
     // TODO: Call ideogram/v3/edit
     setState(() {});
   }
 
   Future<void> _onIdeogramCharacterEdit() async {
     if (_imageBytes == null) return;
+    // Collect prompt + references via a polished bottom sheet
+    final _CharacterRemixInput? remix = await _showCharacterRemixBottomSheet();
+    if (remix == null) return;
+
     _pushAiUndo(_imageBytes!);
-    // TODO: Call ideogram/character_edit
-    setState(() {});
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'ideogram_character_remix',
+      editName: 'ideogram/character/remix',
+      parameters: {
+        'tool': 'ideogram_character_remix',
+        'prompt': remix.prompt,
+        'reference_count': remix.referenceUrls.length,
+      },
+    );
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'ideogram_character_remix',
+        payload: {
+          'prompt': remix.prompt,
+          'reference_urls': remix.referenceUrls,
+        },
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Character remix started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing ideogram_character_remix failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start character remix: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  Future<void> _onElementsRemix() async {
+    if (_imageBytes == null) return;
+    // Collect prompt + single reference image (from library or upload)
+    final _ElementsInput? data = await _showElementsBottomSheet();
+    if (data == null) return;
+
+    _pushAiUndo(_imageBytes!);
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'elements',
+      editName: 'Elements Remix',
+      parameters: {
+        'tool': 'elements',
+        'prompt': data.prompt,
+        'reference_url': data.referenceUrl,
+      },
+    );
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'elements',
+        payload: {
+          'prompt': data.prompt,
+          'reference_url': data.referenceUrl,
+        },
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Elements remix started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing elements failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start elements remix: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
   }
 
   Future<void> _onIdeogramReframe() async {
     if (_imageBytes == null) return;
+    // Ask for target resolution with beautiful bottom sheet
+    final ReframeSelection? sel = await _showReframeBottomSheet();
+    if (sel == null) return;
+
     _pushAiUndo(_imageBytes!);
-    // TODO: Call ideogram/v3/reframe
-    setState(() {});
-  }
-
-  Future<void> _onNanoBanana() async {
-    if (_imageBytes == null) return;
-    setState(() {
-      _activeAiTool = _AiTool.nanoBanana;
-      _nanoError = null;
-    });
-  }
-
-  Widget _buildNanoBananaPanel() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-          child: Row(
-            children: [
-              IconButton(
-                tooltip: 'Back',
-                icon: Icon(Icons.arrow_back_rounded, color: AppColors.onBackground(context)),
-                onPressed: () {
-                  setState(() {
-                    _activeAiTool = _AiTool.none;
-                  });
-                },
-              ),
-              Expanded(
-                child: Text(
-                  'AI Edit · nano_banana',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(
-                    color: AppColors.onBackground(context),
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-              OutlinedButton(
-                onPressed: _aiCancel,
-                child: const Text('Cancel'),
-              ),
-              const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: _imageBytes == null ? null : _aiSave,
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: AppColors.card(context),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppColors.muted(context).withOpacity(0.3), width: 1),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: TextField(
-                      controller: _nanoPromptController,
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _handleNanoGenerate(),
-                      decoration: InputDecoration(
-                        border: InputBorder.none,
-                        hintText: 'Describe the style or transformation…',
-                        hintStyle: GoogleFonts.inter(color: AppColors.secondaryText(context)),
-                      ),
-                      style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              SizedBox(
-                height: 44,
-                child: ElevatedButton.icon(
-                  onPressed: _nanoIsGenerating ? null : _handleNanoGenerate,
-                  icon: _nanoIsGenerating
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.auto_awesome_rounded),
-                  label: Text(_nanoIsGenerating ? 'Generating…' : 'Generate'),
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (_nanoError != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Text(_nanoError!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
-          ),
-        const SizedBox(height: 8),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: _buildNanoResultCard(),
-          ),
-        ),
-      ],
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'ideogram_v3_reframe',
+      editName: 'ideogram/v3/reframe',
+      parameters: {
+        'tool': 'ideogram_v3_reframe',
+        'width': sel.width,
+        'height': sel.height,
+        if (sel.label != null) 'preset': sel.label,
+      },
     );
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'ideogram_v3_reframe',
+        payload: {
+          'width': sel.width,
+          'height': sel.height,
+        },
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Reframe started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing ideogram_v3_reframe failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start reframe: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  // _onNanoBanana is no longer used; Remix is toggled inline from the toolbar
+
+  // Removed modal dialog version of nano_banana UI
+
+  Future<void> _onCalligrapher() async {
+    if (_imageBytes == null) return;
+    _ensureAiSessionStarted();
+    final TextEditingController controller = TextEditingController();
+    String? prompt;
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Edit Text in Image'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: "e.g. The text is 'Rise'"),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                prompt = controller.text.trim();
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Apply'),
+            ),
+          ],
+        );
+      },
+    );
+    if (prompt == null || prompt!.isEmpty) return;
+
+    _pushAiUndo(_imageBytes!);
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'calligrapher',
+      editName: 'Calligrapher Text Edit',
+      parameters: {
+        'tool': 'calligrapher',
+        'prompt': prompt,
+      },
+    );
+
+    setState(() {
+      _saving = true;
+    });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'calligrapher',
+        payload: {'prompt': prompt},
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Calligrapher started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing calligrapher failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start calligrapher: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  // Reframe UI
+  Future<ReframeSelection?> _showReframeBottomSheet() async {
+    final Color onBg = AppColors.onBackground(context);
+    final TextEditingController widthCtrl = TextEditingController();
+    final TextEditingController heightCtrl = TextEditingController();
+
+    // Helpful presets
+    final List<ReframePreset> presets = <ReframePreset>[
+      const ReframePreset(label: 'Square', subtitle: '1:1', width: 1024, height: 1024),
+      const ReframePreset(label: 'Portrait', subtitle: '4:5', width: 2048, height: 2560),
+      const ReframePreset(label: 'Story', subtitle: '9:16', width: 1080, height: 1920),
+      const ReframePreset(label: 'Landscape', subtitle: '16:9', width: 1920, height: 1080),
+      const ReframePreset(label: 'Widescreen', subtitle: '1440p', width: 2560, height: 1440),
+    ];
+
+    int? selectedIndex;
+    String? errorText;
+
+    void _applyPreset(int index, void Function(void Function()) setState) {
+      selectedIndex = index;
+      widthCtrl.text = presets[index].width.toString();
+      heightCtrl.text = presets[index].height.toString();
+      setState(() {});
+    }
+
+    bool _validWH() {
+      final int? w = int.tryParse(widthCtrl.text.trim());
+      final int? h = int.tryParse(heightCtrl.text.trim());
+      if (w == null || h == null) return false;
+      if (w < 64 || h < 64) return false;
+      if (w > 4096 || h > 4096) return false;
+      return true;
+    }
+
+    final ReframeSelection? result = await showModalBottomSheet<ReframeSelection>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.card(context),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setSheetState) {
+              return Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 12,
+                  bottom: 16 + MediaQuery.of(ctx).viewInsets.bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.autorenew_rounded, color: onBg),
+                        const SizedBox(width: 8),
+                        Text('Reframe', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w800, fontSize: 16)),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: 'Close',
+                          icon: const Icon(Icons.close_rounded),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text('Suggested sizes', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        for (int i = 0; i < presets.length; i++)
+                          ReframePresetCard(
+                            preset: presets[i],
+                            selected: selectedIndex == i,
+                            onTap: () => _applyPreset(i, setSheetState),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    Text('Custom size', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 10),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: AppColors.surface(context),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.muted(context).withOpacity(0.25), width: 1),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: widthCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  border: InputBorder.none,
+                                  hintText: 'Width (px)',
+                                ),
+                                style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                                onChanged: (_) {
+                                  selectedIndex = null;
+                                  setSheetState(() {});
+                                },
+                              ),
+                            ),
+                            Text('×', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w900)),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: TextField(
+                                controller: heightCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  border: InputBorder.none,
+                                  hintText: 'Height (px)',
+                                ),
+                                style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                                onChanged: (_) {
+                                  selectedIndex = null;
+                                  setSheetState(() {});
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (errorText != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(errorText!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
+                      ),
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        if (!_validWH()) {
+                          errorText = 'Please enter a valid size between 64 and 4096 px.';
+                          setSheetState(() {});
+                          return;
+                        }
+                        final int w = int.parse(widthCtrl.text.trim());
+                        final int h = int.parse(heightCtrl.text.trim());
+                        Navigator.of(ctx).pop(ReframeSelection(width: w, height: h, label: selectedIndex != null ? presets[selectedIndex!].label : null));
+                      },
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Start Reframe'),
+                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Powered by Ideogram V3 Reframe',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    return result;
   }
 
   Widget _buildNanoResultCard() {
@@ -1007,32 +1613,32 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                       ),
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        OutlinedButton.icon(
-                          onPressed: _nanoIsGenerating ? null : _handleNanoGenerate,
-                          icon: const Icon(Icons.refresh_rounded),
-                          label: const Text('Regenerate'),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton.icon(
-                          onPressed: _nanoResultBytes == null || _imageBytes == null || _saving
-                              ? null
-                              : () => _handleNanoReplaceWithResult(),
-                          icon: const Icon(Icons.swap_horizontal_circle_outlined),
-                          label: const Text('Replace Original'),
-                        ),
-                        const Spacer(),
-                        ElevatedButton.icon(
-                          onPressed: _nanoResultBytes == null || _saving ? null : () => _handleNanoSaveResultOnly(),
-                          icon: const Icon(Icons.save_alt_rounded),
-                          label: const Text('Save Result'),
-                        ),
-                      ],
-                    ),
-                  ),
+                  // Padding(
+                  //   padding: const EdgeInsets.all(12),
+                  //   child: Row(
+                  //     children: [
+                  //       OutlinedButton.icon(
+                  //         onPressed: _nanoIsGenerating ? null : _handleNanoGenerate,
+                  //         icon: const Icon(Icons.refresh_rounded),
+                  //         label: const Text('Regenerate'),
+                  //       ),
+                  //       const SizedBox(width: 8),
+                  //       OutlinedButton.icon(
+                  //         onPressed: _nanoResultBytes == null || _imageBytes == null || _saving
+                  //             ? null
+                  //             : () => _handleNanoReplaceWithResult(),
+                  //         icon: const Icon(Icons.swap_horizontal_circle_outlined),
+                  //         label: const Text('Replace Original'),
+                  //       ),
+                  //       const Spacer(),
+                  //       ElevatedButton.icon(
+                  //         onPressed: _nanoResultBytes == null || _saving ? null : () => _handleNanoSaveResultOnly(),
+                  //         icon: const Icon(Icons.save_alt_rounded),
+                  //         label: const Text('Save Result'),
+                  //       ),
+                  //     ],
+                  //   ),
+                  // ),
                 ],
               )
             : _buildEmptyResultPlaceholder(),
@@ -1076,36 +1682,36 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       _nanoError = null;
     });
     try {
-      final Uint8List result = await _fal.nanoBananaEdit(
-        inputImageBytes: _imageBytes!,
-        prompt: prompt,
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'nano_banana',
+        payload: {'prompt': prompt},
+        inputImageUrl: _originalOrLastUrl,
       );
+      if (mounted) {
+        setState(() {
+          _currentNanoJobId = job.id;
+        });
+        // Inline panel auto-rebuilds via setState
+      }
+      await AiJobsService.instance.triggerProcessing(job.id);
       if (!mounted) return;
-      setState(() {
-        _nanoResultBytes = result;
-      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('AI started working')),
+      );
     } catch (e) {
+      Logger.error('Queueing nano_banana failed', context: {
+        'prompt': prompt,
+        'error': e.toString(),
+      });
       if (!mounted) return;
       setState(() {
         _nanoError = e.toString();
       });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _nanoIsGenerating = false;
-        });
-      }
-    }
+    } finally {}
   }
 
-  Future<void> _handleNanoReplaceWithResult() async {
-    if (_nanoResultBytes == null) return;
-    // Push undo before replacing current canvas image
-    if (_imageBytes != null) _pushAiUndo(_imageBytes!);
-    setState(() {
-      _imageBytes = Uint8List.fromList(_nanoResultBytes!);
-    });
-  }
+  // Removed Replace Original action per request
 
   Future<void> _handleNanoSaveResultOnly() async {
     if (_nanoResultBytes == null) return;
@@ -1204,6 +1810,478 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       ),
     );
   }
+
+  // Character Remix UI
+  Future<_CharacterRemixInput?> _showCharacterRemixBottomSheet() async {
+    final TextEditingController promptCtrl = TextEditingController();
+    final Color onBg = AppColors.onBackground(context);
+
+    // Load user's recent images to use as references
+    late Future<List<MediaItem>> mediaFuture;
+    mediaFuture = _mediaRepo.listMedia(limit: 60, filterMime: 'image');
+
+    // Local selection state inside the sheet
+    final Set<String> selectedUrls = <String>{};
+    String? errorText;
+
+    bool canStart() => promptCtrl.text.trim().isNotEmpty && selectedUrls.isNotEmpty;
+
+    final _CharacterRemixInput? result = await showModalBottomSheet<_CharacterRemixInput>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.card(context),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setSheetState) {
+              return Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 12,
+                  bottom: 16 + MediaQuery.of(ctx).viewInsets.bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.person_rounded, color: onBg),
+                        const SizedBox(width: 8),
+                        Text('Character Remix', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w800, fontSize: 16)),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: 'Close',
+                          icon: const Icon(Icons.close_rounded),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text('Prompt', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: AppColors.surface(context),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.muted(context).withOpacity(0.25), width: 1),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: TextField(
+                          controller: promptCtrl,
+                          minLines: 1,
+                          maxLines: 3,
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            hintText: 'Describe the style, setting, or scenario for your character…',
+                          ),
+                          style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                          onChanged: (_) => setSheetState(() {}),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Text('Reference images', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                        const Spacer(),
+                        if (selectedUrls.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppColors.selectedBackground(context),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text('${selectedUrls.length} selected', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w700, fontSize: 12)),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    FutureBuilder<List<MediaItem>>(
+                      future: mediaFuture,
+                      builder: (c, snap) {
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Center(child: CircularProgressIndicator()),
+                          );
+                        }
+                        final items = (snap.data ?? <MediaItem>[])
+                            .where((m) => m.mimeType.startsWith('image'))
+                            .toList();
+                        if (items.isEmpty) {
+                          return Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Text('No images in your library yet. Upload some to use as references.',
+                                style: GoogleFonts.inter(color: AppColors.secondaryText(context))),
+                          );
+                        }
+                        final double gridSpacing = 8;
+                        final int crossAxisCount = 3;
+                        final double availH = MediaQuery.of(ctx).size.height;
+                        final double gridH = (availH * 0.45).clamp(220.0, 420.0);
+                        return SizedBox(
+                          height: gridH,
+                          child: GridView.builder(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            physics: const BouncingScrollPhysics(),
+                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: crossAxisCount,
+                              crossAxisSpacing: gridSpacing,
+                              mainAxisSpacing: gridSpacing,
+                              childAspectRatio: 1,
+                            ),
+                            itemCount: items.length,
+                            itemBuilder: (c, i) {
+                              final item = items[i];
+                              final String url = item.thumbnailUrl ?? item.url;
+                              final bool selected = selectedUrls.contains(url);
+                              return GestureDetector(
+                                onTap: () {
+                                  if (selected) {
+                                    selectedUrls.remove(url);
+                                  } else {
+                                    // Limit to 4 refs to keep API efficient
+                                    if (selectedUrls.length >= 4) {
+                                      errorText = 'Maximum 4 reference images';
+                                    } else {
+                                      errorText = null;
+                                      selectedUrls.add(url);
+                                    }
+                                  }
+                                  setSheetState(() {});
+                                },
+                                child: Stack(
+                                  children: [
+                                    Positioned.fill(
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: Image.network(
+                                          url,
+                                          fit: BoxFit.cover,
+                                          errorBuilder: (c, e, st) => Container(
+                                            color: AppColors.muted(context),
+                                            child: Icon(Icons.image_not_supported_outlined, color: AppColors.secondaryText(context)),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned.fill(
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 150),
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(12),
+                                          border: Border.all(color: selected ? AppColors.primaryPurple : Colors.transparent, width: 2),
+                                          color: selected ? AppColors.primaryPurple.withOpacity(0.15) : Colors.transparent,
+                                        ),
+                                      ),
+                                    ),
+                                    if (selected)
+                                      Positioned(
+                                        right: 6,
+                                        top: 6,
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            color: AppColors.primaryPurple,
+                                            borderRadius: BorderRadius.circular(999),
+                                            boxShadow: [
+                                              BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 3)),
+                                            ],
+                                          ),
+                                          padding: const EdgeInsets.all(4),
+                                          child: const Icon(Icons.check_rounded, color: Colors.white, size: 14),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                    if (errorText != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(errorText!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
+                      ),
+                    const SizedBox(height: 14),
+                    ElevatedButton.icon(
+                      onPressed: canStart()
+                          ? () {
+                              Navigator.of(ctx).pop(_CharacterRemixInput(
+                                prompt: promptCtrl.text.trim(),
+                                referenceUrls: selectedUrls.toList(growable: false),
+                              ));
+                            }
+                          : null,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Start Remix'),
+                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Powered by Ideogram V3 Character Remix',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    return result;
+  }
+
+  // Elements bottom sheet: prompt + pick single reference or upload from gallery
+  Future<_ElementsInput?> _showElementsBottomSheet() async {
+    final TextEditingController promptCtrl = TextEditingController();
+    final Color onBg = AppColors.onBackground(context);
+
+    late Future<List<MediaItem>> mediaFuture;
+    mediaFuture = _mediaRepo.listMedia(limit: 60, filterMime: 'image');
+
+    String? selectedUrl;
+    String? errorText;
+
+    bool canStart() => promptCtrl.text.trim().isNotEmpty && (selectedUrl != null && selectedUrl!.isNotEmpty);
+
+    final _ElementsInput? result = await showModalBottomSheet<_ElementsInput>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.card(context),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setSheetState) {
+              return Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 12,
+                  bottom: 16 + MediaQuery.of(ctx).viewInsets.bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.widgets_rounded, color: onBg),
+                        const SizedBox(width: 8),
+                        Text('Elements', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w800, fontSize: 16)),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: 'Close',
+                          icon: const Icon(Icons.close_rounded),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text('Prompt', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: AppColors.surface(context),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.muted(context).withOpacity(0.25), width: 1),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: TextField(
+                          controller: promptCtrl,
+                          minLines: 1,
+                          maxLines: 3,
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            hintText: 'Describe what to add or remix into your photo…',
+                          ),
+                          style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                          onChanged: (_) => setSheetState(() {}),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Text('Reference image', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                        const Spacer(),
+                        if (selectedUrl != null)
+                          Text('1 selected', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w700, fontSize: 12)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    FutureBuilder<List<MediaItem>>(
+                      future: mediaFuture,
+                      builder: (c, snap) {
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Center(child: CircularProgressIndicator()),
+                          );
+                        }
+                        final items = (snap.data ?? <MediaItem>[]) 
+                            .where((m) => m.mimeType.startsWith('image'))
+                            .toList();
+                        final double gridSpacing = 8;
+                        final int crossAxisCount = 3;
+                        final double availH = MediaQuery.of(ctx).size.height;
+                        final double gridH = (availH * 0.38).clamp(200.0, 380.0);
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (items.isEmpty)
+                              Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Text('No images yet. Upload one from your gallery below.',
+                                    style: GoogleFonts.inter(color: AppColors.secondaryText(context))),
+                              ),
+                            if (items.isNotEmpty)
+                              SizedBox(
+                                height: gridH,
+                                child: GridView.builder(
+                                  padding: const EdgeInsets.only(bottom: 4),
+                                  physics: const BouncingScrollPhysics(),
+                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: crossAxisCount,
+                                    crossAxisSpacing: gridSpacing,
+                                    mainAxisSpacing: gridSpacing,
+                                    childAspectRatio: 1,
+                                  ),
+                                  itemCount: items.length,
+                                  itemBuilder: (c, i) {
+                                    final item = items[i];
+                                    final String url = item.thumbnailUrl ?? item.url;
+                                    final bool selected = selectedUrl == url;
+                                    return GestureDetector(
+                                      onTap: () {
+                                        selectedUrl = selected ? null : url;
+                                        errorText = null;
+                                        setSheetState(() {});
+                                      },
+                                      child: Stack(
+                                        children: [
+                                          Positioned.fill(
+                                            child: ClipRRect(
+                                              borderRadius: BorderRadius.circular(12),
+                                              child: Image.network(
+                                                url,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (c, e, st) => Container(
+                                                  color: AppColors.muted(context),
+                                                  child: Icon(Icons.image_not_supported_outlined, color: AppColors.secondaryText(context)),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          Positioned.fill(
+                                            child: AnimatedContainer(
+                                              duration: const Duration(milliseconds: 150),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.circular(12),
+                                                border: Border.all(color: selected ? AppColors.primaryPurple : Colors.transparent, width: 2),
+                                                color: selected ? AppColors.primaryPurple.withOpacity(0.15) : Colors.transparent,
+                                              ),
+                                            ),
+                                          ),
+                                          if (selected)
+                                            Positioned(
+                                              right: 6,
+                                              top: 6,
+                                              child: Container(
+                                                decoration: BoxDecoration(
+                                                  color: AppColors.primaryPurple,
+                                                  borderRadius: BorderRadius.circular(999),
+                                                  boxShadow: [
+                                                    BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 3)),
+                                                  ],
+                                                ),
+                                                padding: const EdgeInsets.all(4),
+                                                child: const Icon(Icons.check_rounded, color: Colors.white, size: 14),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            const SizedBox(height: 8),
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                // Let user upload a new reference from gallery; on success, refresh list and select it
+                                try {
+                                  final mediaCap = MediaPipelineService();
+                                  await mediaCap.pickFromGalleryAndQueue();
+                                  mediaFuture = _mediaRepo.listMedia(limit: 60, filterMime: 'image');
+                                  setSheetState(() {});
+                                } catch (_) {}
+                              },
+                              icon: const Icon(Icons.photo_library_rounded),
+                              label: const Text('Upload from gallery'),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                    if (errorText != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(errorText!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
+                      ),
+                    const SizedBox(height: 14),
+                    ElevatedButton.icon(
+                      onPressed: canStart()
+                          ? () {
+                              Navigator.of(ctx).pop(_ElementsInput(
+                                prompt: promptCtrl.text.trim(),
+                                referenceUrl: selectedUrl!,
+                              ));
+                            }
+                          : null,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Start Elements'),
+                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Powered by Nano Banana Edit',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    return result;
+  }
+
+}
+
+class _CharacterRemixInput {
+  final String prompt;
+  final List<String> referenceUrls;
+  const _CharacterRemixInput({required this.prompt, required this.referenceUrls});
+}
+
+class _ElementsInput {
+  final String prompt;
+  final String referenceUrl;
+  const _ElementsInput({required this.prompt, required this.referenceUrl});
 }
 
 

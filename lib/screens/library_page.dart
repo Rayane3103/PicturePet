@@ -28,6 +28,7 @@ class _LibraryPageState extends State<LibraryPage> {
   final List<Project> _items = [];
   final ScrollController _scroll = ScrollController();
   StreamSubscription<Map<String, dynamic>>? _uploadSub;
+  StreamSubscription<void>? _projectsSub;
   final List<Map<String, dynamic>> _uploadStatuses = [];
   final Map<String, Timer> _pendingDeleteTimers = {};
   final Map<String, Project> _pendingDeleteProjects = {};
@@ -41,7 +42,11 @@ class _LibraryPageState extends State<LibraryPage> {
     super.initState();
     _loadMore();
     _scroll.addListener(() {
-      if (_scroll.position.pixels > _scroll.position.maxScrollExtent - 300 && !_loading && _hasMore) {
+      if (_loading || !_hasMore) return;
+      final max = _scroll.position.maxScrollExtent;
+      if (max <= 0) return; // avoid triggering on initial layout
+      final threshold = max - 300;
+      if (_scroll.position.pixels > threshold) {
         _loadMore();
       }
     });
@@ -76,7 +81,7 @@ class _LibraryPageState extends State<LibraryPage> {
       }
     });
     // Listen for project changes (rename/duplicate/delete/save)
-    ProjectsEvents.instance.stream.listen((_) {
+    _projectsSub = ProjectsEvents.instance.stream.listen((_) {
       if (mounted) {
         _refresh();
       }
@@ -90,7 +95,10 @@ class _LibraryPageState extends State<LibraryPage> {
       final page = await _projects.list(limit: _limit, offset: _offset);
       if (!mounted) return;
       setState(() {
-        _items.addAll(page);
+        // De-duplicate by project id to avoid showing duplicates
+        final existingIds = _items.map((e) => e.id).toSet();
+        final uniqueNew = page.where((p) => !existingIds.contains(p.id));
+        _items.addAll(uniqueNew);
         _offset += page.length;
         _hasMore = page.length == _limit;
       });
@@ -112,6 +120,7 @@ class _LibraryPageState extends State<LibraryPage> {
   @override
   void dispose() {
     _uploadSub?.cancel();
+    _projectsSub?.cancel();
     _scroll.dispose();
     super.dispose();
   }
@@ -462,7 +471,13 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Widget _grid() {
-    if (_items.isEmpty && !_loading) {
+    // Build a combined list: uploading placeholders first, then projects
+    final placeholders = _uploadStatuses
+        .where((e) => e['type'] == 'progress' || e['type'] == 'started' || e['type'] == 'failed')
+        .toList();
+
+    // Show empty state only if nothing is uploading and there are no projects
+    if (_items.isEmpty && placeholders.isEmpty && !_loading) {
       return SliverToBoxAdapter(
         child: Container(
           width: double.infinity,
@@ -495,11 +510,6 @@ class _LibraryPageState extends State<LibraryPage> {
         ),
       );
     }
-
-    // Build a combined list: uploading placeholders first, then projects
-    final placeholders = _uploadStatuses
-        .where((e) => e['type'] == 'progress' || e['type'] == 'started' || e['type'] == 'failed')
-        .toList();
     final totalCount = placeholders.length + _items.length;
 
     return SliverMasonryGrid.count(
@@ -511,7 +521,8 @@ class _LibraryPageState extends State<LibraryPage> {
         if (index < placeholders.length) {
           return _uploadPlaceholderCard(placeholders[index]);
         }
-        return _card(_items[index - placeholders.length]);
+        final proj = _items[index - placeholders.length];
+        return KeyedSubtree(key: ValueKey(proj.id), child: _card(proj));
       },
     );
   }
@@ -568,7 +579,7 @@ class _LibraryPageState extends State<LibraryPage> {
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            '9,625 Credits available',
+                            '50 Credits available',
                             style: GoogleFonts.inter(
                               color: AppColors.onBackground(context),
                               fontWeight: FontWeight.w600,
@@ -658,6 +669,7 @@ class _LibraryPageState extends State<LibraryPage> {
             ),
           ),
         ),
+
         // Remove old linear status bar in favor of grid placeholders
 
         SliverPadding(
@@ -667,8 +679,9 @@ class _LibraryPageState extends State<LibraryPage> {
         
         // Bottom spacing
         const SliverToBoxAdapter(
-          child: SizedBox(height: 32),
+          child: SizedBox(height: 150),
         ),
+        
       ],
     );
   }
@@ -759,4 +772,5 @@ class _LibraryPageState extends State<LibraryPage> {
       ),
     );
   }
+
 }

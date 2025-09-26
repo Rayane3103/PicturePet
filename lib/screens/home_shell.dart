@@ -10,6 +10,8 @@ import '../services/media_pipeline_service.dart';
 // Removed unused import
 import 'dart:async';
 import '../services/upload_queue_service.dart';
+import '../services/fal_ai_service.dart';
+import '../utils/image_compress.dart';
 
 class HomeShell extends StatefulWidget {
   final ThemeMode themeMode;
@@ -25,6 +27,8 @@ class _HomeShellState extends State<HomeShell> {
   int _index = 0;
   final MediaPipelineService _pipeline = MediaPipelineService();
   StreamSubscription<Map<String, dynamic>>? _uploadSub;
+  final FalAiService _fal = FalAiService();
+  bool _aiGenerating = false;
 
   void _openAddSheet() {
     showModalBottomSheet(
@@ -41,15 +45,14 @@ class _HomeShellState extends State<HomeShell> {
             mainAxisSize: MainAxisSize.min,
             children: [
               // Header
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppColors.muted(context),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 20),
+              // Container(
+              //   width: 40,
+              //   height: 4,
+              //   decoration: BoxDecoration(
+              //     color: AppColors.muted(context),
+              //     borderRadius: BorderRadius.circular(2),
+              //   ),
+              // ),
               
               // Title
               Text(
@@ -68,7 +71,7 @@ class _HomeShellState extends State<HomeShell> {
                   color: AppColors.secondaryText(context),
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height:10),
               
               // Options
               Container(
@@ -150,6 +153,42 @@ class _HomeShellState extends State<HomeShell> {
                         await _pipeline.captureFromCameraAndQueue(projectName: name);
                       },
                     ),
+                    Divider(
+                      color: AppColors.background(context),
+                      height: 1,
+                    ),
+                    ListTile(
+                      leading: Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: AppColors.primaryPurple.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(
+                          Icons.auto_awesome,
+                          color: AppColors.primaryPurple,
+                          size: 20,
+                        ),
+                      ),
+                      title: Text(
+                        'Generate with AI',
+                        style: GoogleFonts.inter(
+                          color: AppColors.onBackground(context),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Create from a text prompt',
+                        style: GoogleFonts.inter(
+                          color: AppColors.secondaryText(context),
+                          fontSize: 14,
+                        ),
+                      ),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _promptGenerateWithAi();
+                      },
+                    ),
                   ],
                 ),
               ),
@@ -179,6 +218,71 @@ class _HomeShellState extends State<HomeShell> {
         );
       },
     );
+  }
+
+  Future<void> _promptGenerateWithAi() async {
+    String prompt = '';
+    final res = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Generate with AI'),
+          content: TextField(
+            autofocus: true,
+            maxLines: null,
+            onChanged: (v) => prompt = v,
+            decoration: const InputDecoration(hintText: 'Describe the image you want to create'),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, prompt.trim().isEmpty ? null : prompt.trim()),
+              child: const Text('Generate'),
+            ),
+          ],
+        );
+      },
+    );
+    if (res == null) return;
+    await _generateWithAi(res);
+  }
+
+  Future<void> _generateWithAi(String prompt) async {
+    if (_aiGenerating) return;
+    setState(() => _aiGenerating = true);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Generating image with AI...')));
+    try {
+      final bytes = await _fal.imagen4Generate(prompt: prompt);
+      final compressed = await compressImage(bytes, quality: 90);
+      final thumb = await generateThumbnail(compressed, size: 384, quality: 75);
+      final filename = 'imagen4_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final projectName = _deriveProjectNameFromPrompt(prompt);
+      UploadQueueService.instance.enqueue(UploadTask(
+        bytes: compressed,
+        filename: filename,
+        contentType: 'image/jpeg',
+        thumbnailBytes: thumb,
+        thumbnailContentType: 'image/jpeg',
+        metadata: {
+          'source': 'ai_imagen4',
+          'prompt': prompt,
+        },
+        projectName: projectName,
+      ));
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('AI generation failed: $e')));
+    } finally {
+      if (mounted) setState(() => _aiGenerating = false);
+    }
+  }
+
+  String _deriveProjectNameFromPrompt(String prompt) {
+    final trimmed = prompt.trim();
+    if (trimmed.isEmpty) return 'AI Image ${DateTime.now().millisecondsSinceEpoch}';
+    final single = trimmed.replaceAll(RegExp(r"\s+"), ' ');
+    final maxLen = 40;
+    final cut = single.length <= maxLen ? single : '${single.substring(0, maxLen - 1)}…';
+    return 'AI: $cut';
   }
 
   @override

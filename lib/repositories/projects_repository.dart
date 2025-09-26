@@ -56,8 +56,26 @@ class ProjectsRepository {
         })
         .select()
         .single();
+    final duplicated = Project.fromMap(Map<String, dynamic>.from(data));
+
+    // Ensure initial history exists for the duplicated project as well
+    if (duplicated.originalImageUrl != null && duplicated.originalImageUrl!.isNotEmpty) {
+      try {
+        final editsRepo = ProjectEditsRepository(client: _client);
+        await editsRepo.insert(
+          projectId: duplicated.id,
+          editName: 'Initial Import',
+          parameters: const {'stage': 'original'},
+          inputImageUrl: duplicated.originalImageUrl,
+          outputImageUrl: duplicated.originalImageUrl,
+          creditCost: 0,
+          status: 'completed',
+        );
+      } catch (_) {}
+    }
+
     ProjectsEvents.instance.notifyChanged();
-    return Project.fromMap(Map<String, dynamic>.from(data));
+    return duplicated;
   }
 
   Future<Project> create({required String name, String? originalImageUrl, String? thumbnailUrl, int? fileSizeBytes}) async {
@@ -106,7 +124,11 @@ class ProjectsRepository {
         .update(updates)
         .eq('id', projectId)
         .select()
-        .single();
+        .maybeSingle();
+    if (data == null) {
+      // Most likely RLS update policy missing; surface a clear message
+      throw StateError('Update failed: no row returned. Ensure RLS allows UPDATE on projects for the owning user.');
+    }
     return Project.fromMap(Map<String, dynamic>.from(data));
   }
 

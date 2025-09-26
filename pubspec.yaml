@@ -66,7 +66,6 @@ dependencies:
   
   # Social auth dependencies
   google_sign_in: ^6.1.6
-  flutter_facebook_auth: ^6.0.4
   
   # Deep linking and navigation
   app_links: ^6.4.1
@@ -96,6 +95,7 @@ flutter:
   uses-material-design: true
 
   assets:
+    - .env
     - assets/images/
 
   # To add assets to your application, add an assets section, like this:
