@@ -45,6 +45,11 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Photos permission for saving exports -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>This app saves exported images to your Photos library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Allow access to your Photos to save edited images.</string>
 	<!-- Allow network connections for loading images -->
 	<key>NSAppTransportSecurity</key>
 	<dict>

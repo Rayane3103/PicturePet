@@ -89,6 +89,119 @@ async function runFalNanoBananaEdit(inputUrl: string, prompt: string): Promise<U
   throw new Error('fal response missing image')
 }
 
+async function runFalStyleTransfer(inputUrl: string, stylePrompt: string): Promise<Uint8Array> {
+  const apiKey = Deno.env.get('FAL_API_KEY')
+  if (!apiKey) throw new Error('Missing FAL_API_KEY')
+
+  const url = 'https://fal.run/fal-ai/image-editing/style-transfer'
+  // Provide fields in both root and input for broader compatibility across fal models
+  const body = {
+    prompt: stylePrompt,
+    style_prompt: stylePrompt,
+    image: inputUrl,
+    image_url: inputUrl,
+    image_urls: [inputUrl],
+    input: {
+      prompt: stylePrompt,
+      style_prompt: stylePrompt,
+      image: inputUrl,
+      image_url: inputUrl,
+      image_urls: [inputUrl],
+    },
+  }
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Key ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    let details = ''
+    try { details = await resp.text() } catch (_) {}
+    console.error('style_transfer_error', { status: resp.status, details })
+    throw new Error(`fal.run HTTP ${resp.status}${details ? `: ${details}` : ''}`)
+  }
+  const json = await resp.json()
+  if (json?.images?.[0]?.url) {
+    const img = await fetch(json.images[0].url)
+    if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+    const buf = await img.arrayBuffer()
+    return new Uint8Array(buf)
+  }
+  if (typeof json.image === 'string' && json.image.startsWith('data:')) {
+    const idx = json.image.indexOf(',')
+    const b64data = json.image.slice(idx + 1)
+    const binary = atob(b64data)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+  throw new Error('fal style transfer response missing image')
+}
+
+// SeedVR2 Upscale: upscales an image by a factor (default 2x)
+async function runFalSeedVRUpscale(inputUrl: string, upscaleFactor: number): Promise<Uint8Array> {
+  const apiKey = Deno.env.get('FAL_API_KEY')
+  if (!apiKey) throw new Error('Missing FAL_API_KEY')
+
+  const url = 'https://fal.run/fal-ai/seedvr/upscale/image'
+  const factor = Math.max(1, Math.min(4, Number.isFinite(upscaleFactor) ? upscaleFactor : 2))
+
+  // Provide fields in both root and input for broader compatibility
+  const body = {
+    image_url: inputUrl,
+    upscale_factor: factor,
+    input: {
+      image_url: inputUrl,
+      upscale_factor: factor,
+    },
+  }
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Key ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    let details = ''
+    try { details = await resp.text() } catch (_) {}
+    console.error('seedvr_upscale_error', { status: resp.status, details })
+    throw new Error(`fal.run HTTP ${resp.status}${details ? `: ${details}` : ''}`)
+  }
+  const json = await resp.json()
+  // Prefer { image: { url } } per model schema
+  if (json?.image?.url) {
+    const img = await fetch(json.image.url)
+    if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+    const buf = await img.arrayBuffer()
+    return new Uint8Array(buf)
+  }
+  // Fallbacks similar to other endpoints
+  if (json?.images?.[0]?.url) {
+    const img = await fetch(json.images[0].url)
+    if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+    const buf = await img.arrayBuffer()
+    return new Uint8Array(buf)
+  }
+  if (typeof json.image === 'string' && json.image.startsWith('data:')) {
+    const idx = json.image.indexOf(',')
+    const b64data = json.image.slice(idx + 1)
+    const binary = atob(b64data)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+  throw new Error('fal seedvr upscaler response missing image')
+}
+
 // Elements Remix: nano-banana edit using project image + single reference image
 async function runFalElementsRemix(inputUrl: string, prompt: string, referenceUrl: string): Promise<Uint8Array> {
   const apiKey = Deno.env.get('FAL_API_KEY')
@@ -346,6 +459,24 @@ async function processJob(job: AiJobRow): Promise<void> {
         const prompt = (job.payload as Record<string, unknown>)['prompt'] as string
         const inputUrl = job.input_image_url as string
         outputBytes = await runFalNanoBananaEdit(inputUrl, prompt)
+        break
+      }
+      case 'seedvr_upscale': {
+        const payload = job.payload as Record<string, unknown>
+        const inputUrl = job.input_image_url as string
+        let factor = Number(payload['upscale_factor'])
+        if (!Number.isFinite(factor)) factor = 2
+        outputBytes = await runFalSeedVRUpscale(inputUrl, factor)
+        break
+      }
+      case 'style_transfer': {
+        const payload = job.payload as Record<string, unknown>
+        const inputUrl = job.input_image_url as string
+        const stylePrompt = (payload['style_prompt'] as string) ?? (payload['prompt'] as string) ?? ''
+        if (!stylePrompt) {
+          throw new Error('style_transfer requires style_prompt')
+        }
+        outputBytes = await runFalStyleTransfer(inputUrl, stylePrompt)
         break
       }
       case 'ideogram_v3_reframe': {

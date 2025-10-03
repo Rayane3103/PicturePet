@@ -35,7 +35,8 @@ values
   ('ideogram_v3_edit', 'ideogram/v3/edit', 'ai', 0, 'free_trial'),
   ('ideogram_character_edit', 'ideogram/character_edit', 'ai', 0, 'free_trial'),
   ('ideogram_v3_reframe', 'ideogram/v3/reframe', 'ai', 0, 'free_trial'),
-  ('calligrapher', 'Calligrapher Text Edit', 'ai', 0, 'free_trial')
+  ('calligrapher', 'Calligrapher Text Edit', 'ai', 0, 'free_trial'),
+  ('seedvr_upscale', 'SeedVR2 Upscale', 'ai', 0, 'free_trial')
 on conflict (name) do update set
   display_name = excluded.display_name,
   type = excluded.type,

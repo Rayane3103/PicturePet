@@ -50,6 +50,9 @@ dependencies:
   image: ^4.1.7
   image_editor: ^1.6.0
   pro_image_editor: ^11.3.0
+  permission_handler: ^11.3.0
+  share_plus: ^7.2.2
+  gal: ^2.3.0
   
   # Storage and preferences
   shared_preferences: ^2.2.2

@@ -25,6 +25,10 @@ import '../models/ai_job.dart';
 import '../models/media_item.dart';
 import 'reframe_presets.dart';
 import '../utils/logger.dart';
+import '../utils/export_utils.dart';
+import 'package:share_plus/share_plus.dart';
+import 'dart:math' as math;
+import 'package:permission_handler/permission_handler.dart';
 
 class _AllowAllScrollBehavior extends ScrollBehavior {
   const _AllowAllScrollBehavior();
@@ -53,6 +57,18 @@ class _AiSnapshot {
   final Uint8List bytes;
   final _AiActionMeta? actionMeta;
   const _AiSnapshot({required this.bytes, this.actionMeta});
+}
+
+class _StylePreset {
+  final String name;
+  final String prompt;
+  final String asset;
+  const _StylePreset({required this.name, required this.prompt, required this.asset});
+}
+
+class _StyleSelection {
+  final String stylePrompt;
+  const _StyleSelection({required this.stylePrompt});
 }
 
 class EditorPage extends StatefulWidget {
@@ -106,6 +122,14 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Uint8List? _nanoResultBytes;
   bool _nanoIsGenerating = false;
   String? _nanoError;
+
+  ExportOptions _lastExportOptions = const ExportOptions(
+    format: ExportFormat.png,
+    quality: 100,
+    scale: 1,
+    includeMetadata: false,
+    transparentBackground: true,
+  );
 
   @override
   void initState() {
@@ -284,13 +308,30 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     return Scaffold(
       appBar: AppBar(
         title: const Text('Editor'),
-        actions: _buildAppBarActions(),
+        actions: [
+          ..._buildAppBarActions(),
+          IconButton(
+            tooltip: 'Export',
+            icon: const Icon(Icons.ios_share_rounded),
+            onPressed: _imageBytes == null ? null : _openExportSheet,
+          ),
+        ],
       ),
       backgroundColor: AppColors.background(context),
       body: Stack(
         children: [
           Positioned.fill(
             child: _buildImage(),
+          ),
+          Positioned(
+            right: 20,
+            bottom: 96,
+            child: SafeArea(
+              child: _ExportFab(
+                enabled: _imageBytes != null,
+                onTap: _openExportSheet,
+              ),
+            ),
           ),
           // Keep overlay visible while saving OR while any tracked background job is active
           if (_saving || _activeJobIds.isNotEmpty)
@@ -307,6 +348,12 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         child: _buildBottomTabs(),
       ),
     );
+  }
+
+  Future<void> _openExportSheet() async {
+    if (_imageBytes == null) return;
+    final ExportOptions? opts = await _showExportBottomSheetPreview(_imageBytes!);
+    if (opts == null) return;
   }
 
   List<Widget> _buildAppBarActions() {
@@ -348,6 +395,368 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     }
   }
 
+  Future<ExportOptions?> _showExportBottomSheetPreview(Uint8List previewBytes) async {
+    ExportFormat format = _lastExportOptions.format;
+    int quality = _lastExportOptions.quality;
+    double scale = _lastExportOptions.scale;
+    bool transparentBackground = _lastExportOptions.transparentBackground;
+    
+
+    bool exporting = false;
+
+    final isRTL = Directionality.of(context) == TextDirection.rtl;
+    final Color onBg = AppColors.onBackground(context);
+
+    double _fitToScreenScale() {
+      try {
+        final mq = MediaQuery.of(context);
+        final double screenW = mq.size.width * mq.devicePixelRatio;
+        final double screenH = (mq.size.height * 0.8) * mq.devicePixelRatio;
+        final image = img.decodeImage(previewBytes);
+        if (image == null) return 1.0;
+        final sw = screenW / image.width;
+        final sh = screenH / image.height;
+        return (math.min(sw, sh)).clamp(0.1, 4.0);
+      } catch (_) {
+        return 1.0;
+      }
+    }
+
+    Future<void> doExportAndSave(StateSetter setModal) async {
+      if (exporting) return;
+      setModal(() { exporting = true; });
+      try {
+        final options = ExportOptions(
+          format: format,
+          quality: quality,
+          scale: scale,
+          includeMetadata: false,
+          watermark: null,
+          transparentBackground: transparentBackground,
+        );
+        final rendered = await renderEditorToBytes(directBytes: _imageBytes);
+        final encoded = await encodeToFormat(rendered, options);
+        final fname = buildFileName(format: options.format);
+        final res = await saveToGallery(encoded, fname, options);
+        if (!mounted) return;
+        if (res.success) {
+          _lastExportOptions = options;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              behavior: SnackBarBehavior.floating,
+              content: Text(isRTL ? 'تم الحفظ في المعرض' : 'Saved to gallery'),
+              action: res.path != null ? SnackBarAction(
+                label: isRTL ? 'فتح' : 'Open',
+                onPressed: () {
+                  Share.shareXFiles([XFile(res.path!)]);
+                },
+              ) : null,
+            ),
+          );
+          if (Navigator.of(context).canPop()) Navigator.of(context).pop(options);
+        } else {
+          final denied = (res.error ?? '').toLowerCase().contains('permission');
+          if (denied) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                behavior: SnackBarBehavior.floating,
+                backgroundColor: Colors.redAccent,
+                content: Text(isRTL ? 'الإذن مرفوض. افتح الإعدادات لمنح الوصول.' : 'Permission denied. Open Settings to grant access.', style: const TextStyle(color: Colors.white)),
+                action: SnackBarAction(
+                  label: isRTL ? 'الإعدادات' : 'Settings',
+                  textColor: Colors.white,
+                  onPressed: () async { await openAppSettings(); },
+                ),
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text(res.error ?? (isRTL ? 'فشل الحفظ' : 'Save failed'), style: const TextStyle(color: Colors.white))),
+            );
+          }
+        }
+      } finally {
+        if (mounted) setModal(() { exporting = false; });
+      }
+    }
+
+    Future<void> doExportAndShare(StateSetter setModal) async {
+      if (exporting) return;
+      setModal(() { exporting = true; });
+      try {
+        final options = ExportOptions(
+          format: format,
+          quality: quality,
+          scale: scale,
+          includeMetadata: false,
+          watermark: null,
+          transparentBackground: transparentBackground,
+        );
+        final rendered = await renderEditorToBytes(directBytes: _imageBytes);
+        final encoded = await encodeToFormat(rendered, options);
+        final fname = buildFileName(format: options.format);
+        final res = await saveToTempAndShare(encoded, fname, options);
+        if (!mounted) return;
+        if (res.success) {
+          _lastExportOptions = options;
+          if (Navigator.of(context).canPop()) Navigator.of(context).pop(options);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text(res.error ?? (isRTL ? 'فشل المشاركة' : 'Share failed'), style: const TextStyle(color: Colors.white))),
+          );
+        }
+      } finally {
+        if (mounted) setModal(() { exporting = false; });
+      }
+    }
+
+    return showModalBottomSheet<ExportOptions>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setModal) {
+          return Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  AppColors.card(context).withOpacity(0.95),
+                  AppColors.background(context).withOpacity(0.98),
+                ],
+              ),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+              border: Border.all(
+                color: AppColors.primaryPurple.withOpacity(0.1),
+                width: 1,
+              ),
+            ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: EdgeInsets.only(left: 24, right: 24, top: 20, bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: isRTL ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                      children: [
+                        Center(
+                          child: Container(
+                            width: 40,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: AppColors.muted(context).withOpacity(0.4),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(colors: [AppColors.primaryPurple, AppColors.primaryBlue]),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: AppColors.primaryPurple.withOpacity(0.3),
+                                    blurRadius: 12,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(Icons.ios_share_rounded, color: Colors.white, size: 22),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isRTL ? 'تصدير' : 'Export',
+                                    style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w800, color: onBg),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    isRTL ? 'اختر التنسيق والجودة والحجم' : 'Choose format, quality, and size',
+                                    style: GoogleFonts.inter(fontSize: 12, color: AppColors.mutedText(context)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: AppColors.surface(context),
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [softShadow(context)],
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            height: 120,
+                            child: InkWell(
+                              onTap: () {
+                                Navigator.of(context).push(MaterialPageRoute(builder: (_) => _FullImagePreview(bytes: previewBytes)));
+                              },
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  Image.memory(previewBytes, fit: BoxFit.cover, filterQuality: FilterQuality.high),
+                                  BackdropFilter(
+                                    filter: ImageFilter.blur(sigmaX: 1.5, sigmaY: 1.5),
+                                    child: Container(color: Colors.black.withOpacity(0.08)),
+                                  ),
+                                  Center(
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.35),
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(Icons.visibility_rounded, color: Colors.white, size: 22),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(isRTL ? 'التنسيق' : 'Format', style: TextStyle(color: onBg, fontWeight: FontWeight.w700)),
+                            const SizedBox(height: 8),
+                            SegmentedButton<ExportFormat>(
+                              segments: const [
+                                ButtonSegment(value: ExportFormat.png, label: Text('PNG')),
+                                ButtonSegment(value: ExportFormat.jpeg, label: Text('JPEG')),
+                              ],
+                              selected: {format},
+                              onSelectionChanged: (s) => setModal(() { format = s.first; }),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    if (format == ExportFormat.jpeg) ...[
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(isRTL ? 'الجودة' : 'Quality', style: TextStyle(color: onBg, fontWeight: FontWeight.w700)),
+                          Text('$quality'),
+                        ],
+                      ),
+                      Slider(
+                        min: 40,
+                        max: 100,
+                        divisions: 60,
+                        value: quality.toDouble().clamp(40, 100),
+                        onChanged: (v) => setModal(() { quality = v.round(); }),
+                      ),
+                    ],
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(isRTL ? 'الحجم' : 'Export size', style: TextStyle(color: onBg, fontWeight: FontWeight.w700)),
+                        DropdownButton<double>(
+                          value: scale,
+                          items: [
+                            const DropdownMenuItem(value: 1.0, child: Text('Original')),
+                            const DropdownMenuItem(value: 0.25, child: Text('0.25x')),
+                            const DropdownMenuItem(value: 0.5, child: Text('0.5x')),
+                            const DropdownMenuItem(value: 2.0, child: Text('2x')),
+                            DropdownMenuItem(value: _fitToScreenScale(), child: Text(isRTL ? 'ملاءمة للشاشة' : 'Fit to screen')),
+                          ],
+                          onChanged: (v) => setModal(() { if (v != null) scale = v; }),
+                        ),
+                      ],
+                    ),
+                    if (format == ExportFormat.png) ...[
+                      SwitchListTile(
+                        value: transparentBackground,
+                        onChanged: (v) => setModal(() { transparentBackground = v; }),
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(isRTL ? 'خلفية شفافة' : 'Transparent background'),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    if (exporting) const LinearProgressIndicator(),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: exporting ? null : () => doExportAndSave(setModal),
+                            icon: const Icon(Icons.download_rounded),
+                            label: Text(
+                              isRTL ? 'تصدير وحفظ' : 'Export & Save',
+                              style: GoogleFonts.inter(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.primaryPurple,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 18),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: exporting ? null : () => doExportAndShare(setModal),
+                            icon: const Icon(Icons.ios_share_rounded),
+                            label: Text(
+                              isRTL ? 'تصدير ومشاركة' : 'Export & Share',
+                              style: GoogleFonts.inter(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.primaryBlue,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 18),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Center(
+                      child: TextButton(
+                        onPressed: exporting ? null : () => Navigator.of(ctx).pop(),
+                        child: Text(isRTL ? 'إلغاء' : 'Cancel'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            ),
+          ),
+          );
+        });
+      },
+    );
+  }
+
   Widget _buildBottomTabs() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -369,17 +778,15 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                       children: [
                         _aiChip(Icons.remove_circle_outline, 'BG Remove', _onRemoveBackground),
                         const SizedBox(width: 8),
-                        _aiChip(Icons.bolt_rounded, _showNanoPanel ? 'Hide Remix' : 'Remix', () {
-                          setState(() {
-                            _showNanoPanel = !_showNanoPanel;
-                          });
-                        }),
+                        _aiChip(Icons.bolt_rounded, 'Remix', _onRemix),
                         const SizedBox(width: 8),
                         _aiChip(Icons.autorenew_rounded, 'Reframe', _onIdeogramReframe),
                         const SizedBox(width: 8),
                         _aiChip(Icons.widgets_rounded, 'Elements', _onElementsRemix),
                         const SizedBox(width: 8),
                         _aiChip(Icons.auto_fix_high_rounded, 'Style', _onStyleTransform),
+                        const SizedBox(width: 8),
+                        _aiChip(Icons.high_quality_rounded, 'Upscale', _onUpscale),
                         const SizedBox(width: 8),
                         // _aiChip(Icons.auto_fix_high_rounded, 'Smart Edit', _onIdeogramEdit),
                         // const SizedBox(width: 8),
@@ -471,56 +878,119 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
           ),
         Container(
           key: _bottomTabsKey,
+          height: 64,
           decoration: BoxDecoration(
-            color: AppColors.card(context).withOpacity(0.85),
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.08),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
+            borderRadius: BorderRadius.circular(32),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppColors.card(context).withOpacity(0.9),
+                AppColors.muted(context).withOpacity(0.5),
+              ],
+            ),
             border: Border.all(
-              color: AppColors.muted(context).withOpacity(0.25),
+              color: AppColors.primaryPurple.withOpacity(0.15),
               width: 1,
             ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.12),
+                blurRadius: 24,
+                spreadRadius: 0,
+                offset: const Offset(0, 12),
+              ),
+              BoxShadow(
+                color: AppColors.primaryPurple.withOpacity(0.08),
+                blurRadius: 16,
+                spreadRadius: 0,
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-          child: Padding(
-            padding: const EdgeInsets.all(8),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(32),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
             child: Container(
               decoration: BoxDecoration(
-                color: AppColors.muted(context).withOpacity(0.6),
-                borderRadius: BorderRadius.circular(16),
+                  color: AppColors.card(context).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(32),
               ),
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
               child: TabBar(
                 controller: _tabController,
                 labelColor: Colors.white,
                 unselectedLabelColor: AppColors.secondaryText(context),
+                    dividerColor: Colors.transparent,
+                    splashBorderRadius: BorderRadius.circular(26),
                 indicator: BoxDecoration(
                   gradient: AppGradients.primary,
-                  borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(26),
                   boxShadow: [
                     BoxShadow(
                       color: AppColors.primaryPurple.withOpacity(0.4),
+                          blurRadius: 12,
+                          spreadRadius: 0,
+                          offset: const Offset(0, 4),
+                        ),
+                        BoxShadow(
+                          color: AppColors.primaryBlue.withOpacity(0.2),
                       blurRadius: 8,
-                      offset: const Offset(0, 3),
+                          spreadRadius: 0,
+                          offset: const Offset(0, 2),
                     ),
                   ],
                 ),
                 labelStyle: GoogleFonts.inter(
                   fontWeight: FontWeight.w700,
-                  fontSize: 14,
+                      fontSize: 16,
+                      letterSpacing: 0.5,
                 ),
                 unselectedLabelStyle: GoogleFonts.inter(
-                  fontWeight: FontWeight.w500,
-                  fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 15,
+                      letterSpacing: 0.25,
                 ),
                 indicatorSize: TabBarIndicatorSize.tab,
-                tabs: const [
-                  Tab(text: 'Manual'),
-                  Tab(text: 'AI'),
+                    indicatorPadding: const EdgeInsets.all(2),
+                    tabs: [
+                      Tab(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.tune_rounded,
+                              size: 18,
+                              color: _tabController.index == 0 
+                                ? Colors.white 
+                                : AppColors.secondaryText(context),
+                            ),
+                            const SizedBox(width: 6),
+                            const Text('Manual'),
                 ],
+              ),
+            ),
+                      Tab(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.auto_awesome_rounded,
+                              size: 18,
+                              color: _tabController.index == 1 
+                                ? Colors.white 
+                                : AppColors.secondaryText(context),
+                            ),
+                            const SizedBox(width: 6),
+                            const Text('AI'),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -1002,12 +1472,12 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 const SizedBox(height: 6),
                 Text(
                   label,
-                  maxLines: 2,
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(
                     fontWeight: FontWeight.w700,
-                    fontSize: 11,
+                    fontSize: 10,
                     color: Colors.white,
                   ),
                 ),
@@ -1175,16 +1645,429 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
 
   Future<void> _onStyleTransform() async {
     if (_imageBytes == null) return;
+    final _StyleSelection? sel = await _showStyleTransferBottomSheet();
+    if (sel == null) return;
+
     _pushAiUndo(_imageBytes!);
-    _lastAiAction = const _AiActionMeta(
-      toolIdName: 'ai_style',
-      editName: 'AI Style Transform',
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'style_transfer',
+      editName: 'Style Transfer',
       parameters: {
-        'tool': 'ai_style',
+        'tool': 'style_transfer',
+        'style_prompt': sel.stylePrompt,
       },
     );
-    // TODO: Implement style transform
-    setState(() {});
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'style_transfer',
+        payload: {
+          'style_prompt': sel.stylePrompt,
+        },
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Style transfer started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing style_transfer failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start style transfer: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  Future<void> _onUpscale() async {
+    if (_imageBytes == null) return;
+    final int? factor = await _showUpscaleBottomSheet();
+    if (factor == null) return;
+
+    _pushAiUndo(_imageBytes!);
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'seedvr_upscale',
+      editName: 'SeedVR2 Upscale',
+      parameters: {
+        'tool': 'seedvr_upscale',
+        'upscale_factor': factor,
+      },
+    );
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'seedvr_upscale',
+        payload: {
+          'upscale_factor': factor,
+        },
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Upscale started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing seedvr_upscale failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start upscaler: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  Future<int?> _showUpscaleBottomSheet() async {
+    final Color onBg = AppColors.onBackground(context);
+    int selected = 2;
+
+    final int? result = await showModalBottomSheet<int>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setSheetState) {
+              return Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.8,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                          // Handle bar
+                          Center(
+                            child: Container(
+                              width: 40,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: AppColors.muted(context).withOpacity(0.4),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          // Header
+                    Row(
+                      children: [
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      AppColors.primaryPurple,
+                                      AppColors.accentPurple,
+                                    ],
+                                  ),
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppColors.primaryPurple.withOpacity(0.3),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ],
+                                ),
+                                child: const Icon(
+                                  Icons.high_quality_rounded, 
+                                  color: Colors.white, 
+                                  size: 24,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Upscale',
+                                      style: GoogleFonts.inter(
+                          color: onBg,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 24,
+                                        letterSpacing: 0.25,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Enhance image resolution',
+                                      style: GoogleFonts.inter(
+                                        color: AppColors.secondaryText(context),
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: AppColors.muted(context).withOpacity(0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
+                                  tooltip: 'Close',
+                                  icon: Icon(
+                                    Icons.close_rounded,
+                                    color: AppColors.secondaryText(context),
+                                  ),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                                ),
+                        ),
+                      ],
+                    ),
+                          const SizedBox(height: 24),
+                          // Scale Selection
+                          Text(
+                            'Scale factor',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Row(
+                      children: [
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () => setSheetState(() => selected = 2),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 200),
+                                    padding: const EdgeInsets.all(20),
+                                    decoration: BoxDecoration(
+                                      gradient: selected == 2 
+                                        ? AppGradients.primary
+                                        : LinearGradient(
+                                            colors: [
+                                              AppColors.card(context).withOpacity(0.6),
+                                              AppColors.surface(context).withOpacity(0.4),
+                                            ],
+                                          ),
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: selected == 2 
+                                          ? Colors.transparent
+                                          : AppColors.muted(context).withOpacity(0.3),
+                                        width: 1,
+                                      ),
+                                      boxShadow: [
+                                        if (selected == 2) ...[
+                                          BoxShadow(
+                                            color: AppColors.primaryPurple.withOpacity(0.3),
+                                            blurRadius: 16,
+                                            offset: const Offset(0, 8),
+                                          ),
+                                        ] else ...[
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.05),
+                                            blurRadius: 8,
+                                            offset: const Offset(0, 4),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          '2×',
+                                          style: GoogleFonts.inter(
+                                            color: selected == 2 
+                                              ? Colors.white
+                                              : AppColors.onBackground(context),
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 32,
+                                            letterSpacing: 0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                                        Text(
+                                          'Double size',
+                                          style: GoogleFonts.inter(
+                                            color: selected == 2 
+                                              ? Colors.white.withOpacity(0.9)
+                                              : AppColors.secondaryText(context),
+                                            fontWeight: FontWeight.w500,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () => setSheetState(() => selected = 4),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 200),
+                                    padding: const EdgeInsets.all(20),
+                                    decoration: BoxDecoration(
+                                      gradient: selected == 4 
+                                        ? AppGradients.primary
+                                        : LinearGradient(
+                                            colors: [
+                                              AppColors.card(context).withOpacity(0.6),
+                                              AppColors.surface(context).withOpacity(0.4),
+                                            ],
+                                          ),
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: selected == 4 
+                                          ? Colors.transparent
+                                          : AppColors.muted(context).withOpacity(0.3),
+                                        width: 1,
+                                      ),
+                                      boxShadow: [
+                                        if (selected == 4) ...[
+                                          BoxShadow(
+                                            color: AppColors.primaryPurple.withOpacity(0.3),
+                                            blurRadius: 16,
+                                            offset: const Offset(0, 8),
+                                          ),
+                                        ] else ...[
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.05),
+                                            blurRadius: 8,
+                                            offset: const Offset(0, 4),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          '4×',
+                                          style: GoogleFonts.inter(
+                                            color: selected == 4 
+                                              ? Colors.white
+                                              : AppColors.onBackground(context),
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 32,
+                                            letterSpacing: 0.5,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          'Quadruple size',
+                                          style: GoogleFonts.inter(
+                                            color: selected == 4 
+                                              ? Colors.white.withOpacity(0.9)
+                                              : AppColors.secondaryText(context),
+                                            fontWeight: FontWeight.w500,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 24),
+                          // Action Button
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: AppGradients.primary,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.primaryPurple.withOpacity(0.4),
+                                  blurRadius: 16,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: ElevatedButton.icon(
+                              onPressed: () => Navigator.of(ctx).pop(selected),
+                              icon: const Icon(
+                                Icons.trending_up_rounded,
+                                color: Colors.white,
+                              ),
+                              label: Text(
+                                'Start Upscale',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.transparent,
+                                foregroundColor: Colors.white,
+                                shadowColor: Colors.transparent,
+                                padding: const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          // Footer
+                          Center(
+                            child: Text(
+                              'Powered by SeedVR2',
+                              style: GoogleFonts.inter(
+                                color: AppColors.mutedText(context),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                  ],
+                    ),
+                  ),
+                );
+              },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    return result;
   }
 
   // ignore: unused_element
@@ -1201,6 +2084,392 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     // TODO: Call ideogram/v3/edit
     setState(() {});
   }
+
+  // Style Transfer UI
+  Future<_StyleSelection?> _showStyleTransferBottomSheet() async {
+    final Color onBg = AppColors.onBackground(context);
+
+    final List<_StylePreset> presets = const <_StylePreset>[
+      _StylePreset(
+        name: 'Original',
+        prompt: 'apply no changes keep original photo realism',
+        asset: 'assets/images/filter.png',
+      ),
+      _StylePreset(
+        name: 'Van Gogh',
+        prompt: "in the style of Vincent van Gogh's Starry Night swirling brushstrokes vivid blues and yellows",
+        asset: 'assets/images/filter.png',
+      ),
+      _StylePreset(
+        name: 'Ghibli',
+        prompt: 'Studio Ghibli painterly whimsical soft colors gentle lighting anime aesthetic',
+        asset: 'assets/images/filter.png',
+      ),
+      _StylePreset(
+        name: 'Watercolor',
+        prompt: 'watercolor painting soft bleeding edges paper texture pastel tones',
+        asset: 'assets/images/filter.png',
+      ),
+      _StylePreset(
+        name: 'Oil Paint',
+        prompt: 'thick oil paint impasto dramatic lighting rich contrast canvas texture',
+        asset: 'assets/images/filter.png',
+      ),
+      _StylePreset(
+        name: 'Cyberpunk',
+        prompt: 'neon cyberpunk city glow magenta cyan rim light futuristic high contrast',
+        asset: 'assets/images/filter.png',
+      ),
+      _StylePreset(
+        name: 'Toon',
+        prompt: 'bold outlines cel shaded cartoon simplified shapes vibrant palette',
+        asset: 'assets/images/filter.png',
+      ),
+    ];
+
+    int selected = 1; // default to a cool preset
+
+    final _StyleSelection? result = await showModalBottomSheet<_StyleSelection>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setSheetState) {
+              return Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                          // Handle bar
+                          Center(
+                            child: Container(
+                              width: 40,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: AppColors.muted(context).withOpacity(0.4),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          // Header
+                    Row(
+                      children: [
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  gradient: AppGradients.primary,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppColors.primaryPurple.withOpacity(0.3),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ],
+                                ),
+                                child: const Icon(
+                                  Icons.auto_fix_high_rounded, 
+                                  color: Colors.white, 
+                                  size: 24,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Style Transfer',
+                                      style: GoogleFonts.inter(
+                                        color: onBg,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 24,
+                                        letterSpacing: 0.25,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Transform your image with artistic styles',
+                                      style: GoogleFonts.inter(
+                                        color: AppColors.secondaryText(context),
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: AppColors.muted(context).withOpacity(0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
+                          tooltip: 'Close',
+                                  icon: Icon(
+                                    Icons.close_rounded,
+                                    color: AppColors.secondaryText(context),
+                                  ),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                                ),
+                        ),
+                      ],
+                    ),
+                          const SizedBox(height: 32),
+                          // Style Selection Section
+                          Text(
+                            'Choose a style',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Container(
+                            height: 180,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.6),
+                                  AppColors.surface(context).withOpacity(0.4),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.1),
+                                width: 1,
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: presets.length,
+                                    separatorBuilder: (_, __) => const SizedBox(width: 16),
+                        itemBuilder: (context, index) {
+                          final p = presets[index];
+                          final bool isSel = selected == index;
+                          return GestureDetector(
+                            onTap: () {
+                              selected = index;
+                              setSheetState(() {});
+                            },
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                            AnimatedContainer(
+                                              duration: const Duration(milliseconds: 200),
+                                              curve: Curves.easeInOut,
+                                  width: 90,
+                                              height: 110,
+                                  decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(
+                                                  color: isSel 
+                                                    ? AppColors.primaryPurple 
+                                                    : AppColors.muted(context).withOpacity(0.3),
+                                                  width: isSel ? 3 : 1,
+                                    ),
+                                    boxShadow: [
+                                                  if (isSel) ...[
+                                      BoxShadow(
+                                                      color: AppColors.primaryPurple.withOpacity(0.3),
+                                                      blurRadius: 16,
+                                                      offset: const Offset(0, 8),
+                                                    ),
+                                                  ] else ...[
+                                                    BoxShadow(
+                                                      color: Colors.black.withOpacity(0.05),
+                                                      blurRadius: 8,
+                                                      offset: const Offset(0, 4),
+                                                    ),
+                                                  ],
+                                    ],
+                                  ),
+                                  child: ClipRRect(
+                                                borderRadius: BorderRadius.circular(19),
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                                    Image.asset(
+                                                      p.asset, 
+                                                      fit: BoxFit.cover,
+                                                      color: isSel ? null : AppColors.muted(context).withOpacity(0.2),
+                                                      colorBlendMode: isSel ? null : BlendMode.overlay,
+                                                    ),
+                                                    if (isSel) ...[
+                                                      Container(
+                                                        decoration: BoxDecoration(
+                                                          gradient: LinearGradient(
+                                                            begin: Alignment.topLeft,
+                                                            end: Alignment.bottomRight,
+                                                            colors: [
+                                                              AppColors.primaryPurple.withOpacity(0.2),
+                                                              AppColors.primaryBlue.withOpacity(0.1),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
+                                        Positioned(
+                                          right: 8,
+                                          top: 8,
+                                                      child: AnimatedScale(
+                                                        scale: isSel ? 1.0 : 0.0,
+                                                        duration: const Duration(milliseconds: 200),
+                                            child: Container(
+                                                          padding: const EdgeInsets.all(6),
+                                              decoration: BoxDecoration(
+                                                            gradient: AppGradients.primary,
+                                                            shape: BoxShape.circle,
+                                                            boxShadow: [
+                                                              BoxShadow(
+                                                                color: AppColors.primaryPurple.withOpacity(0.4),
+                                                                blurRadius: 8,
+                                                                offset: const Offset(0, 2),
+                                                              ),
+                                                            ],
+                                                          ),
+                                                          child: const Icon(
+                                                            Icons.check_rounded, 
+                                                            size: 14, 
+                                                            color: Colors.white,
+                                                          ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                            const SizedBox(height: 10),
+                                SizedBox(
+                                  width: 90,
+                                  child: Text(
+                                    p.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                    style: GoogleFonts.inter(
+                                                  color: isSel 
+                                                    ? AppColors.primaryPurple 
+                                                    : AppColors.onBackground(context),
+                                      fontWeight: isSel ? FontWeight.w700 : FontWeight.w600,
+                                                  fontSize: 11,
+                                                  letterSpacing: 0.2,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 32),
+                          // Action Button
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: AppGradients.primary,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.primaryPurple.withOpacity(0.4),
+                                  blurRadius: 16,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: ElevatedButton.icon(
+                      onPressed: () {
+                        final chosen = presets[selected];
+                        Navigator.of(ctx).pop(_StyleSelection(stylePrompt: chosen.prompt));
+                      },
+                              icon: const Icon(
+                                Icons.palette_rounded,
+                                color: Colors.white,
+                              ),
+                              label: Text(
+                                'Apply Style',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.transparent,
+                                foregroundColor: Colors.white,
+                                shadowColor: Colors.transparent,
+                                padding: const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          // Footer
+                          Center(
+                            child: Text(
+                      'Powered by fal.ai Style Transfer',
+                              style: GoogleFonts.inter(
+                                color: AppColors.mutedText(context),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+              );
+            },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    return result;
+  }
+
 
   Future<void> _onIdeogramCharacterEdit() async {
     if (_imageBytes == null) return;
@@ -1246,7 +2515,10 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
-  }
+
+}
+
+ 
 
   Future<void> _onElementsRemix() async {
     if (_imageBytes == null) return;
@@ -1348,32 +2620,8 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Future<void> _onCalligrapher() async {
     if (_imageBytes == null) return;
     _ensureAiSessionStarted();
-    final TextEditingController controller = TextEditingController();
-    String? prompt;
-    await showDialog(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          title: const Text('Edit Text in Image'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(hintText: "e.g. The text is 'Rise'"),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
-            ElevatedButton(
-              onPressed: () {
-                prompt = controller.text.trim();
-                Navigator.of(ctx).pop();
-              },
-              child: const Text('Apply'),
-            ),
-          ],
-        );
-      },
-    );
-    if (prompt == null || prompt!.isEmpty) return;
+    final String? prompt = await _showTextEditBottomSheet();
+    if (prompt == null || prompt.isEmpty) return;
 
     _pushAiUndo(_imageBytes!);
     _lastAiAction = _AiActionMeta(
@@ -1385,9 +2633,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       },
     );
 
-    setState(() {
-      _saving = true;
-    });
+    setState(() { _saving = true; });
     try {
       final job = await _aiJobsRepo.enqueueJob(
         projectId: widget.projectId,
@@ -1450,90 +2696,338 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     final ReframeSelection? result = await showModalBottomSheet<ReframeSelection>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppColors.card(context),
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      backgroundColor: Colors.transparent,
       builder: (ctx) {
-        return SafeArea(
-          child: StatefulBuilder(
-            builder: (ctx, setSheetState) {
-              return Padding(
-                padding: EdgeInsets.only(
-                  left: 16,
-                  right: 16,
-                  top: 12,
-                  bottom: 16 + MediaQuery.of(ctx).viewInsets.bottom,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.autorenew_rounded, color: onBg),
-                        const SizedBox(width: 8),
-                        Text('Reframe', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w800, fontSize: 16)),
-                        const Spacer(),
-                        IconButton(
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: SafeArea(
+                child: StatefulBuilder(
+                  builder: (ctx, setSheetState) {
+                    return ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.of(ctx).size.height * 0.9,
+                      ),
+                      child: SingleChildScrollView(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            left: 24,
+                            right: 24,
+                            top: 20,
+                            bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // Handle bar
+                              Center(
+                                child: Container(
+                                  width: 40,
+                                  height: 4,
+                                  decoration: BoxDecoration(
+                                    color: AppColors.muted(context).withOpacity(0.4),
+                                    borderRadius: BorderRadius.circular(2),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Header
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        colors: [
+                                          AppColors.primaryBlue,
+                                          AppColors.accentBlue,
+                                        ],
+                                      ),
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: AppColors.primaryBlue.withOpacity(0.3),
+                                          blurRadius: 12,
+                                          offset: const Offset(0, 4),
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Icon(
+                                      Icons.autorenew_rounded, 
+                                      color: Colors.white, 
+                                      size: 24,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Reframe',
+                                          style: GoogleFonts.inter(
+                                            color: onBg,
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 24,
+                                            letterSpacing: 0.25,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Change image dimensions intelligently',
+                                      style: GoogleFonts.inter(
+                                        color: AppColors.secondaryText(context),
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: AppColors.muted(context).withOpacity(0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
                           tooltip: 'Close',
-                          icon: const Icon(Icons.close_rounded),
+                                  icon: Icon(
+                                    Icons.close_rounded,
+                                    color: AppColors.secondaryText(context),
+                                  ),
                           onPressed: () => Navigator.of(ctx).pop(),
+                                ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    Text('Suggested sizes', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
+                          const SizedBox(height: 32),
+                          // Suggested sizes section
+                          Text(
+                            'Popular formats',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.6),
+                                  AppColors.surface(context).withOpacity(0.4),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.1),
+                                width: 1,
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                child: Wrap(
+                                  spacing: 12,
+                                  runSpacing: 12,
                       children: [
                         for (int i = 0; i < presets.length; i++)
-                          ReframePresetCard(
-                            preset: presets[i],
-                            selected: selectedIndex == i,
+                                      GestureDetector(
                             onTap: () => _applyPreset(i, setSheetState),
+                                        child: AnimatedContainer(
+                                          duration: const Duration(milliseconds: 200),
+                                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                          decoration: BoxDecoration(
+                                            gradient: selectedIndex == i 
+                                              ? LinearGradient(
+                                                  colors: [
+                                                    AppColors.primaryBlue,
+                                                    AppColors.accentBlue,
+                                                  ],
+                                                )
+                                              : LinearGradient(
+                                                  colors: [
+                                                    AppColors.card(context).withOpacity(0.6),
+                                                    AppColors.surface(context).withOpacity(0.4),
+                                                  ],
+                                                ),
+                                            borderRadius: BorderRadius.circular(12),
+                                            border: Border.all(
+                                              color: selectedIndex == i 
+                                                ? Colors.transparent
+                                                : AppColors.muted(context).withOpacity(0.3),
+                                              width: 1,
+                                            ),
+                                            boxShadow: [
+                                              if (selectedIndex == i) ...[
+                                                BoxShadow(
+                                                  color: AppColors.primaryBlue.withOpacity(0.3),
+                                                  blurRadius: 12,
+                                                  offset: const Offset(0, 6),
+                                                ),
+                                              ] else ...[
+                                                BoxShadow(
+                                                  color: Colors.black.withOpacity(0.05),
+                                                  blurRadius: 6,
+                                                  offset: const Offset(0, 3),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                presets[i].label,
+                                                style: GoogleFonts.inter(
+                                                  color: selectedIndex == i 
+                                                    ? Colors.white
+                                                    : AppColors.onBackground(context),
+                                                  fontWeight: FontWeight.w700,
+                                                  fontSize: 14,
+                                                  letterSpacing: 0.25,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                presets[i].subtitle,
+                                                style: GoogleFonts.inter(
+                                                  color: selectedIndex == i 
+                                                    ? Colors.white.withOpacity(0.9)
+                                                    : AppColors.secondaryText(context),
+                                                  fontWeight: FontWeight.w500,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
                           ),
-                      ],
-                    ),
-                    const SizedBox(height: 18),
-                    Text('Custom size', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 10),
+                          const SizedBox(height: 24),
+                          // Custom size section
+                          Text(
+                            'Custom dimensions',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
                     Container(
                       decoration: BoxDecoration(
-                        color: AppColors.surface(context),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.muted(context).withOpacity(0.25), width: 1),
-                      ),
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.8),
+                                  AppColors.surface(context).withOpacity(0.6),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.15),
+                                width: 1,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.05),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  padding: const EdgeInsets.all(20),
                         child: Row(
                           children: [
                             Expanded(
                               child: TextField(
                                 controller: widthCtrl,
                                 keyboardType: TextInputType.number,
-                                decoration: const InputDecoration(
+                                          decoration: InputDecoration(
                                   border: InputBorder.none,
-                                  hintText: 'Width (px)',
-                                ),
-                                style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                                            hintText: 'Width',
+                                            hintStyle: GoogleFonts.inter(
+                                              color: AppColors.mutedText(context),
+                                              fontWeight: FontWeight.w400,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                          style: GoogleFonts.inter(
+                                            color: onBg,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 16,
+                                          ),
                                 onChanged: (_) {
                                   selectedIndex = null;
                                   setSheetState(() {});
                                 },
                               ),
                             ),
-                            Text('×', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w900)),
-                            const SizedBox(width: 8),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                                        child: Text(
+                                          '×',
+                                          style: GoogleFonts.inter(
+                                            color: AppColors.secondaryText(context),
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 20,
+                                          ),
+                                        ),
+                                      ),
                             Expanded(
                               child: TextField(
                                 controller: heightCtrl,
                                 keyboardType: TextInputType.number,
-                                decoration: const InputDecoration(
+                                          decoration: InputDecoration(
                                   border: InputBorder.none,
-                                  hintText: 'Height (px)',
-                                ),
-                                style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                                            hintText: 'Height',
+                                            hintStyle: GoogleFonts.inter(
+                                              color: AppColors.mutedText(context),
+                                              fontWeight: FontWeight.w400,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                          style: GoogleFonts.inter(
+                                            color: onBg,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 16,
+                                          ),
                                 onChanged: (_) {
                                   selectedIndex = null;
                                   setSheetState(() {});
@@ -1544,13 +3038,62 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                         ),
                       ),
                     ),
-                    if (errorText != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(errorText!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
-                      ),
-                    const SizedBox(height: 16),
-                    ElevatedButton.icon(
+                            ),
+                          ),
+                          if (errorText != null) ...[
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.redAccent.withOpacity(0.2),
+                                  width: 1,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.error_outline_rounded,
+                                    color: Colors.redAccent,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      errorText!,
+                                      style: GoogleFonts.inter(
+                                        color: Colors.redAccent,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 32),
+                          // Action Button
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  AppColors.primaryBlue,
+                                  AppColors.accentBlue,
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.primaryBlue.withOpacity(0.4),
+                                  blurRadius: 16,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: ElevatedButton.icon(
                       onPressed: () {
                         if (!_validWH()) {
                           errorText = 'Please enter a valid size between 64 and 4096 px.';
@@ -1561,25 +3104,590 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                         final int h = int.parse(heightCtrl.text.trim());
                         Navigator.of(ctx).pop(ReframeSelection(width: w, height: h, label: selectedIndex != null ? presets[selectedIndex!].label : null));
                       },
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('Start Reframe'),
-                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Powered by Ideogram V3 Reframe',
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
-                    ),
-                  ],
+                              icon: const Icon(
+                                Icons.aspect_ratio_rounded,
+                                color: Colors.white,
+                              ),
+                              label: Text(
+                                'Start Reframe',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.transparent,
+                                foregroundColor: Colors.white,
+                                shadowColor: Colors.transparent,
+                                padding: const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                              // Footer
+                              Center(
+                                child: Text(
+                                  'Powered by Ideogram V3 Reframe',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.mutedText(context),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
-              );
-            },
+              ),
+            ),
           ),
         );
       },
     );
 
+    return result;
+  }
+
+  // Remix bottom sheet: prompt only (Elements remains separate for ref image)
+  Future<String?> _showRemixBottomSheet() async {
+    final Color onBg = AppColors.onBackground(context);
+    final TextEditingController promptCtrl = TextEditingController();
+    final String? result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+                    left: 24,
+                    right: 24,
+                    top: 20,
+                    bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                      // Handle bar
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: AppColors.muted(context).withOpacity(0.4),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      // Header
+                Row(
+                  children: [
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              gradient: AppGradients.primary,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.primaryPurple.withOpacity(0.3),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: const Icon(
+                              Icons.bolt_rounded, 
+                              color: Colors.white, 
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Remix',
+                                  style: GoogleFonts.inter(
+                                    color: onBg,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 24,
+                                    letterSpacing: 0.25,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Transform your image with AI',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.secondaryText(context),
+                                    fontWeight: FontWeight.w500,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            decoration: BoxDecoration(
+                              color: AppColors.muted(context).withOpacity(0.2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: IconButton(
+                      tooltip: 'Close',
+                              icon: Icon(
+                                Icons.close_rounded,
+                                color: AppColors.secondaryText(context),
+                              ),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                            ),
+                    ),
+                  ],
+                ),
+                      const SizedBox(height: 32),
+                      // Input Section
+                      Text(
+                        'Describe your vision',
+                        style: GoogleFonts.inter(
+                          color: AppColors.onBackground(context),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                          letterSpacing: 0.15,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              AppColors.card(context).withOpacity(0.8),
+                              AppColors.surface(context).withOpacity(0.6),
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: AppColors.primaryPurple.withOpacity(0.15),
+                            width: 1,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.05),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(20),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                  child: Padding(
+                              padding: const EdgeInsets.all(20),
+                    child: TextField(
+                      controller: promptCtrl,
+                                minLines: 3,
+                                maxLines: 5,
+                                textCapitalization: TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                        border: InputBorder.none,
+                                  hintText: 'Turn this into a painting...\nMake it cyberpunk style...\nAdd neon lights and rain...',
+                                  hintStyle: GoogleFonts.inter(
+                                    color: AppColors.mutedText(context),
+                                    fontWeight: FontWeight.w400,
+                                    fontSize: 16,
+                                    height: 1.5,
+                                  ),
+                                ),
+                                style: GoogleFonts.inter(
+                                  color: onBg,
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 16,
+                                  height: 1.5,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      // Action Button
+                      Container(
+                        decoration: BoxDecoration(
+                          gradient: AppGradients.primary,
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.primaryPurple.withOpacity(0.4),
+                              blurRadius: 16,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: ElevatedButton.icon(
+                  onPressed: () {
+                    final p = promptCtrl.text.trim();
+                    if (p.isEmpty) {
+                      Navigator.of(ctx).pop();
+                    } else {
+                      Navigator.of(ctx).pop(p);
+                    }
+                  },
+                          icon: const Icon(
+                            Icons.auto_awesome_rounded,
+                            color: Colors.white,
+                          ),
+                          label: Text(
+                            'Start Remix',
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.transparent,
+                            foregroundColor: Colors.white,
+                            shadowColor: Colors.transparent,
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    return result;
+  }
+
+  Future<void> _onRemix() async {
+    if (_imageBytes == null) return;
+    final String? prompt = await _showRemixBottomSheet();
+    if (prompt == null || prompt.isEmpty) return;
+    // Use nano_banana for simple remix prompt (no reference)
+    _pushAiUndo(_imageBytes!);
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'nano_banana',
+      editName: 'nano_banana',
+      parameters: {
+        'tool': 'nano_banana',
+        'prompt': prompt,
+      },
+    );
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'nano_banana',
+        payload: {'prompt': prompt},
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Remix started')),
+      );
+    } catch (e) {
+      Logger.error('Queueing remix failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start remix: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  // Text edit bottom sheet
+  Future<String?> _showTextEditBottomSheet() async {
+    final Color onBg = AppColors.onBackground(context);
+    final TextEditingController controller = TextEditingController();
+    final String? result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+                    left: 24,
+                    right: 24,
+                    top: 20,
+                    bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                      // Handle bar
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: AppColors.muted(context).withOpacity(0.4),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      // Header
+                Row(
+                  children: [
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  AppColors.primaryPurple,
+                                  AppColors.primaryBlue,
+                                ],
+                              ),
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.primaryPurple.withOpacity(0.3),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: const Icon(
+                              Icons.text_fields_rounded, 
+                              color: Colors.white, 
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Text Edit',
+                                  style: GoogleFonts.inter(
+                                    color: onBg,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 24,
+                                    letterSpacing: 0.25,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Edit text within your image',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.secondaryText(context),
+                                    fontWeight: FontWeight.w500,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            decoration: BoxDecoration(
+                              color: AppColors.muted(context).withOpacity(0.2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: IconButton(
+                      tooltip: 'Close',
+                              icon: Icon(
+                                Icons.close_rounded,
+                                color: AppColors.secondaryText(context),
+                              ),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                            ),
+                    ),
+                  ],
+                ),
+                      const SizedBox(height: 32),
+                      // Input Section
+                      Text(
+                        'Text editing instruction',
+                        style: GoogleFonts.inter(
+                          color: AppColors.onBackground(context),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                          letterSpacing: 0.15,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              AppColors.card(context).withOpacity(0.8),
+                              AppColors.surface(context).withOpacity(0.6),
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: AppColors.primaryPurple.withOpacity(0.15),
+                            width: 1,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.05),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(20),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                  child: Padding(
+                              padding: const EdgeInsets.all(20),
+                    child: TextField(
+                      controller: controller,
+                                minLines: 2,
+                                maxLines: 4,
+                                textCapitalization: TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                        border: InputBorder.none,
+                                  hintText: 'Change the text "Welcome" to "Hello"\nMake the heading say "2024"\nReplace the sign text with "Open"',
+                                  hintStyle: GoogleFonts.inter(
+                                    color: AppColors.mutedText(context),
+                                    fontWeight: FontWeight.w400,
+                                    fontSize: 16,
+                                    height: 1.5,
+                                  ),
+                                ),
+                                style: GoogleFonts.inter(
+                                  color: onBg,
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 16,
+                                  height: 1.5,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      // Action Button
+                      Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              AppColors.primaryPurple,
+                              AppColors.primaryBlue,
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.primaryPurple.withOpacity(0.4),
+                              blurRadius: 16,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: ElevatedButton.icon(
+                  onPressed: () {
+                    final p = controller.text.trim();
+                    if (p.isEmpty) {
+                      Navigator.of(ctx).pop();
+                    } else {
+                      Navigator.of(ctx).pop(p);
+                    }
+                  },
+                          icon: const Icon(
+                            Icons.edit_rounded,
+                            color: Colors.white,
+                          ),
+                          label: Text(
+                            'Start Text Edit',
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.transparent,
+                            foregroundColor: Colors.white,
+                            shadowColor: Colors.transparent,
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
     return result;
   }
 
@@ -1829,83 +3937,265 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     final _CharacterRemixInput? result = await showModalBottomSheet<_CharacterRemixInput>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppColors.card(context),
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      backgroundColor: Colors.transparent,
       builder: (ctx) {
-        return SafeArea(
-          child: StatefulBuilder(
-            builder: (ctx, setSheetState) {
-              return Padding(
-                padding: EdgeInsets.only(
-                  left: 16,
-                  right: 16,
-                  top: 12,
-                  bottom: 16 + MediaQuery.of(ctx).viewInsets.bottom,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.person_rounded, color: onBg),
-                        const SizedBox(width: 8),
-                        Text('Character Remix', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w800, fontSize: 16)),
-                        const Spacer(),
-                        IconButton(
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: SafeArea(
+                child: StatefulBuilder(
+                  builder: (ctx, setSheetState) {
+                    return ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.of(ctx).size.height * 0.9,
+                      ),
+                      child: SingleChildScrollView(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            left: 24,
+                            right: 24,
+                            top: 20,
+                            bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // Handle bar
+                              Center(
+                                child: Container(
+                                  width: 40,
+                                  height: 4,
+                                  decoration: BoxDecoration(
+                                    color: AppColors.muted(context).withOpacity(0.4),
+                                    borderRadius: BorderRadius.circular(2),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Header
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        colors: [
+                                          AppColors.accentPurple,
+                                          AppColors.primaryPurple,
+                                        ],
+                                      ),
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: AppColors.accentPurple.withOpacity(0.3),
+                                          blurRadius: 12,
+                                          offset: const Offset(0, 4),
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Icon(
+                                      Icons.person_rounded, 
+                                      color: Colors.white, 
+                                      size: 24,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Character Remix',
+                                          style: GoogleFonts.inter(
+                                            color: onBg,
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 24,
+                                            letterSpacing: 0.25,
+                                          ),
+                                        ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Transform characters with reference images',
+                                      style: GoogleFonts.inter(
+                                        color: AppColors.secondaryText(context),
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: AppColors.muted(context).withOpacity(0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
                           tooltip: 'Close',
-                          icon: const Icon(Icons.close_rounded),
+                                  icon: Icon(
+                                    Icons.close_rounded,
+                                    color: AppColors.secondaryText(context),
+                                  ),
                           onPressed: () => Navigator.of(ctx).pop(),
+                                ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    Text('Prompt', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 8),
+                          const SizedBox(height: 32),
+                          // Prompt Section
+                          Text(
+                            'Describe your character',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
                     Container(
                       decoration: BoxDecoration(
-                        color: AppColors.surface(context),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.muted(context).withOpacity(0.25), width: 1),
-                      ),
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.8),
+                                  AppColors.surface(context).withOpacity(0.6),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.15),
+                                width: 1,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.05),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  padding: const EdgeInsets.all(20),
                         child: TextField(
                           controller: promptCtrl,
-                          minLines: 1,
-                          maxLines: 3,
-                          decoration: const InputDecoration(
+                                    minLines: 2,
+                                    maxLines: 4,
+                                    textCapitalization: TextCapitalization.sentences,
+                                    decoration: InputDecoration(
                             border: InputBorder.none,
-                            hintText: 'Describe the style, setting, or scenario for your character…',
-                          ),
-                          style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                                      hintText: 'A medieval knight in shining armor...\nA cyberpunk warrior with neon implants...\nA fantasy mage with glowing staff...',
+                                      hintStyle: GoogleFonts.inter(
+                                        color: AppColors.mutedText(context),
+                                        fontWeight: FontWeight.w400,
+                                        fontSize: 16,
+                                        height: 1.5,
+                                      ),
+                                    ),
+                                    style: GoogleFonts.inter(
+                                      color: onBg,
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 16,
+                                      height: 1.5,
+                                    ),
                           onChanged: (_) => setSheetState(() {}),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 14),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          // Reference Images Section
                     Row(
                       children: [
-                        Text('Reference images', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                              Text(
+                                'Reference images',
+                                style: GoogleFonts.inter(
+                                  color: AppColors.onBackground(context),
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.15,
+                                ),
+                              ),
                         const Spacer(),
                         if (selectedUrls.isNotEmpty)
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
-                              color: AppColors.selectedBackground(context),
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Text('${selectedUrls.length} selected', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w700, fontSize: 12)),
+                                    gradient: AppGradients.primary,
+                                    borderRadius: BorderRadius.circular(20),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: AppColors.primaryPurple.withOpacity(0.3),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Text(
+                                    '${selectedUrls.length}/4 selected',
+                                    style: GoogleFonts.inter(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 12,
+                                      letterSpacing: 0.25,
+                                    ),
+                                  ),
                           ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    FutureBuilder<List<MediaItem>>(
+                          const SizedBox(height: 12),
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.6),
+                                  AppColors.surface(context).withOpacity(0.4),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.1),
+                                width: 1,
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: FutureBuilder<List<MediaItem>>(
                       future: mediaFuture,
                       builder: (c, snap) {
                         if (snap.connectionState == ConnectionState.waiting) {
                           return const Padding(
-                            padding: EdgeInsets.all(16),
+                                          padding: EdgeInsets.all(32),
                             child: Center(child: CircularProgressIndicator()),
                           );
                         }
@@ -1914,18 +4204,46 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                             .toList();
                         if (items.isEmpty) {
                           return Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Text('No images in your library yet. Upload some to use as references.',
-                                style: GoogleFonts.inter(color: AppColors.secondaryText(context))),
-                          );
-                        }
-                        final double gridSpacing = 8;
-                        final int crossAxisCount = 3;
-                        final double availH = MediaQuery.of(ctx).size.height;
-                        final double gridH = (availH * 0.45).clamp(220.0, 420.0);
-                        return SizedBox(
-                          height: gridH,
-                          child: GridView.builder(
+                                          padding: const EdgeInsets.all(24),
+                                          child: Column(
+                                            children: [
+                                              Icon(
+                                                Icons.image_outlined,
+                                                size: 40,
+                                                color: AppColors.mutedText(context),
+                                              ),
+                                              const SizedBox(height: 12),
+                                              Text(
+                                                'No images in your library yet',
+                                                style: GoogleFonts.inter(
+                                                  color: AppColors.secondaryText(context),
+                                                  fontWeight: FontWeight.w600,
+                                                  fontSize: 14,
+                                                ),
+                                                textAlign: TextAlign.center,
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                'Upload some images to use as references',
+                                                style: GoogleFonts.inter(
+                                                  color: AppColors.mutedText(context),
+                                                  fontSize: 12,
+                                                ),
+                                                textAlign: TextAlign.center,
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      }
+                                      final double gridSpacing = 12;
+                                      final int crossAxisCount = 3;
+                                      // Calculate rows needed and set appropriate height
+                                      final int rows = (items.length / crossAxisCount).ceil();
+                                      final double itemHeight = 120;
+                                      final double gridH = (rows * itemHeight + (rows - 1) * gridSpacing).clamp(120.0, 280.0);
+                                      return SizedBox(
+                                        height: gridH,
+                                        child: GridView.builder(
                             padding: const EdgeInsets.only(bottom: 4),
                             physics: const BouncingScrollPhysics(),
                             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -1943,10 +4261,11 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                                 onTap: () {
                                   if (selected) {
                                     selectedUrls.remove(url);
+                                                  errorText = null;
                                   } else {
                                     // Limit to 4 refs to keep API efficient
                                     if (selectedUrls.length >= 4) {
-                                      errorText = 'Maximum 4 reference images';
+                                                    errorText = 'Maximum 4 reference images allowed';
                                     } else {
                                       errorText = null;
                                       selectedUrls.add(url);
@@ -1954,48 +4273,91 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                                   }
                                   setSheetState(() {});
                                 },
+                                              child: AnimatedContainer(
+                                                duration: const Duration(milliseconds: 200),
+                                                decoration: BoxDecoration(
+                                                  borderRadius: BorderRadius.circular(16),
+                                                  border: Border.all(
+                                                    color: selected 
+                                                      ? AppColors.primaryPurple 
+                                                      : AppColors.muted(context).withOpacity(0.3),
+                                                    width: selected ? 3 : 1,
+                                                  ),
+                                                  boxShadow: [
+                                                    if (selected) ...[
+                                                      BoxShadow(
+                                                        color: AppColors.primaryPurple.withOpacity(0.3),
+                                                        blurRadius: 12,
+                                                        offset: const Offset(0, 6),
+                                                      ),
+                                                    ] else ...[
+                                                      BoxShadow(
+                                                        color: Colors.black.withOpacity(0.05),
+                                                        blurRadius: 6,
+                                                        offset: const Offset(0, 3),
+                                                      ),
+                                                    ],
+                                                  ],
+                                                ),
+                                                child: ClipRRect(
+                                                  borderRadius: BorderRadius.circular(15),
                                 child: Stack(
                                   children: [
                                     Positioned.fill(
-                                      child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(12),
                                         child: Image.network(
                                           url,
                                           fit: BoxFit.cover,
                                           errorBuilder: (c, e, st) => Container(
                                             color: AppColors.muted(context),
-                                            child: Icon(Icons.image_not_supported_outlined, color: AppColors.secondaryText(context)),
+                                                            child: Icon(
+                                                              Icons.image_not_supported_outlined, 
+                                                              color: AppColors.secondaryText(context),
                                           ),
                                         ),
                                       ),
                                     ),
+                                                      if (selected) ...[
                                     Positioned.fill(
-                                      child: AnimatedContainer(
-                                        duration: const Duration(milliseconds: 150),
+                                                          child: Container(
                                         decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(12),
-                                          border: Border.all(color: selected ? AppColors.primaryPurple : Colors.transparent, width: 2),
-                                          color: selected ? AppColors.primaryPurple.withOpacity(0.15) : Colors.transparent,
+                                                              gradient: LinearGradient(
+                                                                begin: Alignment.topLeft,
+                                                                end: Alignment.bottomRight,
+                                                                colors: [
+                                                                  AppColors.primaryPurple.withOpacity(0.2),
+                                                                  AppColors.primaryBlue.withOpacity(0.1),
+                                                                ],
                                         ),
                                       ),
                                     ),
-                                    if (selected)
+                                                        ),
                                       Positioned(
-                                        right: 6,
-                                        top: 6,
+                                                          right: 8,
+                                                          top: 8,
                                         child: Container(
+                                                            padding: const EdgeInsets.all(6),
                                           decoration: BoxDecoration(
-                                            color: AppColors.primaryPurple,
-                                            borderRadius: BorderRadius.circular(999),
+                                                              gradient: AppGradients.primary,
+                                                              shape: BoxShape.circle,
                                             boxShadow: [
-                                              BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 3)),
-                                            ],
-                                          ),
-                                          padding: const EdgeInsets.all(4),
-                                          child: const Icon(Icons.check_rounded, color: Colors.white, size: 14),
-                                        ),
-                                      ),
-                                  ],
+                                                                BoxShadow(
+                                                                  color: AppColors.primaryPurple.withOpacity(0.4),
+                                                                  blurRadius: 8,
+                                                                  offset: const Offset(0, 2),
+                                                                ),
+                                                              ],
+                                                            ),
+                                                            child: const Icon(
+                                                              Icons.check_rounded, 
+                                                              color: Colors.white, 
+                                                              size: 14,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ],
+                                                  ),
+                                                ),
                                 ),
                               );
                             },
@@ -2003,13 +4365,73 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                         );
                       },
                     ),
-                    if (errorText != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(errorText!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
-                      ),
-                    const SizedBox(height: 14),
-                    ElevatedButton.icon(
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (errorText != null) ...[
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.redAccent.withOpacity(0.2),
+                                  width: 1,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.error_outline_rounded,
+                                    color: Colors.redAccent,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      errorText!,
+                                      style: GoogleFonts.inter(
+                                        color: Colors.redAccent,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 32),
+                          // Action Button
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: canStart() 
+                                ? LinearGradient(
+                                    colors: [
+                                      AppColors.accentPurple,
+                                      AppColors.primaryPurple,
+                                    ],
+                                  )
+                                : LinearGradient(
+                                    colors: [
+                                      AppColors.muted(context).withOpacity(0.3),
+                                      AppColors.muted(context).withOpacity(0.2),
+                                    ],
+                                  ),
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                if (canStart()) ...[
+                                  BoxShadow(
+                                    color: AppColors.accentPurple.withOpacity(0.4),
+                                    blurRadius: 16,
+                                    offset: const Offset(0, 8),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            child: ElevatedButton.icon(
                       onPressed: canStart()
                           ? () {
                               Navigator.of(ctx).pop(_CharacterRemixInput(
@@ -2018,20 +4440,50 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                               ));
                             }
                           : null,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('Start Remix'),
-                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Powered by Ideogram V3 Character Remix',
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
-                    ),
-                  ],
+                              icon: Icon(
+                                Icons.person_pin_rounded,
+                                color: canStart() ? Colors.white : AppColors.mutedText(context),
+                              ),
+                              label: Text(
+                                'Start Character Remix',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.transparent,
+                                foregroundColor: canStart() ? Colors.white : AppColors.mutedText(context),
+                                shadowColor: Colors.transparent,
+                                padding: const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                              // Footer
+                              Center(
+                                child: Text(
+                                  'Powered by Ideogram V3 Character Remix',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.mutedText(context),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
-              );
-            },
+              ),
+            ),
           ),
         );
       },
@@ -2056,96 +4508,313 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     final _ElementsInput? result = await showModalBottomSheet<_ElementsInput>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppColors.card(context),
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      backgroundColor: Colors.transparent,
       builder: (ctx) {
-        return SafeArea(
-          child: StatefulBuilder(
-            builder: (ctx, setSheetState) {
-              return Padding(
-                padding: EdgeInsets.only(
-                  left: 16,
-                  right: 16,
-                  top: 12,
-                  bottom: 16 + MediaQuery.of(ctx).viewInsets.bottom,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.widgets_rounded, color: onBg),
-                        const SizedBox(width: 8),
-                        Text('Elements', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w800, fontSize: 16)),
-                        const Spacer(),
-                        IconButton(
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.card(context).withOpacity(0.95),
+                AppColors.background(context).withOpacity(0.98),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border.all(
+              color: AppColors.primaryPurple.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: SafeArea(
+                child: StatefulBuilder(
+                  builder: (ctx, setSheetState) {
+                    return ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.of(ctx).size.height * 0.9,
+                      ),
+                      child: SingleChildScrollView(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            left: 24,
+                            right: 24,
+                            top: 20,
+                            bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // Handle bar
+                              Center(
+                                child: Container(
+                                  width: 40,
+                                  height: 4,
+                                  decoration: BoxDecoration(
+                                    color: AppColors.muted(context).withOpacity(0.4),
+                                    borderRadius: BorderRadius.circular(2),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Header
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        colors: [
+                                          AppColors.primaryPurple,
+                                          AppColors.primaryBlue,
+                                        ],
+                                      ),
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: AppColors.primaryPurple.withOpacity(0.3),
+                                          blurRadius: 12,
+                                          offset: const Offset(0, 4),
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Icon(
+                                      Icons.widgets_rounded, 
+                                      color: Colors.white, 
+                                      size: 24,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Elements',
+                                          style: GoogleFonts.inter(
+                                            color: onBg,
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 24,
+                                            letterSpacing: 0.25,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Add or remix elements into your photo',
+                                      style: GoogleFonts.inter(
+                                        color: AppColors.secondaryText(context),
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: AppColors.muted(context).withOpacity(0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
                           tooltip: 'Close',
-                          icon: const Icon(Icons.close_rounded),
+                                  icon: Icon(
+                                    Icons.close_rounded,
+                                    color: AppColors.secondaryText(context),
+                                  ),
                           onPressed: () => Navigator.of(ctx).pop(),
+                                ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    Text('Prompt', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 8),
+                          const SizedBox(height: 32),
+                          // Prompt Section
+                          Text(
+                            'Describe what to add',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
                     Container(
                       decoration: BoxDecoration(
-                        color: AppColors.surface(context),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.muted(context).withOpacity(0.25), width: 1),
-                      ),
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.8),
+                                  AppColors.surface(context).withOpacity(0.6),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.15),
+                                width: 1,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.05),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  padding: const EdgeInsets.all(20),
                         child: TextField(
                           controller: promptCtrl,
-                          minLines: 1,
-                          maxLines: 3,
-                          decoration: const InputDecoration(
+                                    minLines: 2,
+                                    maxLines: 4,
+                                    textCapitalization: TextCapitalization.sentences,
+                                    decoration: InputDecoration(
                             border: InputBorder.none,
-                            hintText: 'Describe what to add or remix into your photo…',
-                          ),
-                          style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w600),
+                                      hintText: 'Add a dragon flying overhead...\nPlace flowers around the person...\nAdd a rainbow in the sky...',
+                                      hintStyle: GoogleFonts.inter(
+                                        color: AppColors.mutedText(context),
+                                        fontWeight: FontWeight.w400,
+                                        fontSize: 16,
+                                        height: 1.5,
+                                      ),
+                                    ),
+                                    style: GoogleFonts.inter(
+                                      color: onBg,
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 16,
+                                      height: 1.5,
+                                    ),
                           onChanged: (_) => setSheetState(() {}),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 14),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          // Reference Image Section
                     Row(
                       children: [
-                        Text('Reference image', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontWeight: FontWeight.w700)),
+                              Text(
+                                'Reference image',
+                                style: GoogleFonts.inter(
+                                  color: AppColors.onBackground(context),
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.15,
+                                ),
+                              ),
                         const Spacer(),
                         if (selectedUrl != null)
-                          Text('1 selected', style: GoogleFonts.inter(color: onBg, fontWeight: FontWeight.w700, fontSize: 12)),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    FutureBuilder<List<MediaItem>>(
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    gradient: AppGradients.primary,
+                                    borderRadius: BorderRadius.circular(20),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: AppColors.primaryPurple.withOpacity(0.3),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Text(
+                                    '1 selected',
+                                    style: GoogleFonts.inter(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 12,
+                                      letterSpacing: 0.25,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  AppColors.card(context).withOpacity(0.6),
+                                  AppColors.surface(context).withOpacity(0.4),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.primaryPurple.withOpacity(0.1),
+                                width: 1,
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(20),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: FutureBuilder<List<MediaItem>>(
                       future: mediaFuture,
                       builder: (c, snap) {
                         if (snap.connectionState == ConnectionState.waiting) {
                           return const Padding(
-                            padding: EdgeInsets.all(16),
+                                          padding: EdgeInsets.all(32),
                             child: Center(child: CircularProgressIndicator()),
                           );
                         }
                         final items = (snap.data ?? <MediaItem>[]) 
                             .where((m) => m.mimeType.startsWith('image'))
                             .toList();
-                        final double gridSpacing = 8;
-                        final int crossAxisCount = 3;
-                        final double availH = MediaQuery.of(ctx).size.height;
-                        final double gridH = (availH * 0.38).clamp(200.0, 380.0);
+                                      final double gridSpacing = 12;
+                                      final int crossAxisCount = 3;
+                                      // Calculate rows needed and set appropriate height
+                                      final int rows = (items.length / crossAxisCount).ceil();
+                                      final double itemHeight = 110;
+                                      final double gridH = (rows * itemHeight + (rows - 1) * gridSpacing).clamp(110.0, 250.0);
                         return Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            if (items.isEmpty)
+                                          if (items.isEmpty) ...[
                               Padding(
-                                padding: const EdgeInsets.all(16),
-                                child: Text('No images yet. Upload one from your gallery below.',
-                                    style: GoogleFonts.inter(color: AppColors.secondaryText(context))),
-                              ),
-                            if (items.isNotEmpty)
+                                              padding: const EdgeInsets.all(24),
+                                              child: Column(
+                                                children: [
+                                                  Icon(
+                                                    Icons.image_outlined,
+                                                    size: 40,
+                                                    color: AppColors.mutedText(context),
+                                                  ),
+                                                  const SizedBox(height: 12),
+                                                  Text(
+                                                    'No images in your library yet',
+                                                    style: GoogleFonts.inter(
+                                                      color: AppColors.secondaryText(context),
+                                                      fontWeight: FontWeight.w600,
+                                                      fontSize: 14,
+                                                    ),
+                                                    textAlign: TextAlign.center,
+                                                  ),
+                                                  const SizedBox(height: 4),
+                                                  Text(
+                                                    'Upload one from your gallery below',
+                                                    style: GoogleFonts.inter(
+                                                      color: AppColors.mutedText(context),
+                                                      fontSize: 12,
+                                                    ),
+                                                    textAlign: TextAlign.center,
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ] else ...[
                               SizedBox(
                                 height: gridH,
                                 child: GridView.builder(
@@ -2168,55 +4837,114 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                                         errorText = null;
                                         setSheetState(() {});
                                       },
+                                                    child: AnimatedContainer(
+                                                      duration: const Duration(milliseconds: 200),
+                                                      decoration: BoxDecoration(
+                                                        borderRadius: BorderRadius.circular(16),
+                                                        border: Border.all(
+                                                          color: selected 
+                                                            ? AppColors.primaryPurple 
+                                                            : AppColors.muted(context).withOpacity(0.3),
+                                                          width: selected ? 3 : 1,
+                                                        ),
+                                                        boxShadow: [
+                                                          if (selected) ...[
+                                                            BoxShadow(
+                                                              color: AppColors.primaryPurple.withOpacity(0.3),
+                                                              blurRadius: 12,
+                                                              offset: const Offset(0, 6),
+                                                            ),
+                                                          ] else ...[
+                                                            BoxShadow(
+                                                              color: Colors.black.withOpacity(0.05),
+                                                              blurRadius: 6,
+                                                              offset: const Offset(0, 3),
+                                                            ),
+                                                          ],
+                                                        ],
+                                                      ),
+                                                      child: ClipRRect(
+                                                        borderRadius: BorderRadius.circular(15),
                                       child: Stack(
                                         children: [
                                           Positioned.fill(
-                                            child: ClipRRect(
-                                              borderRadius: BorderRadius.circular(12),
                                               child: Image.network(
                                                 url,
                                                 fit: BoxFit.cover,
                                                 errorBuilder: (c, e, st) => Container(
                                                   color: AppColors.muted(context),
-                                                  child: Icon(Icons.image_not_supported_outlined, color: AppColors.secondaryText(context)),
+                                                                  child: Icon(
+                                                                    Icons.image_not_supported_outlined, 
+                                                                    color: AppColors.secondaryText(context),
                                                 ),
                                               ),
                                             ),
                                           ),
+                                                            if (selected) ...[
                                           Positioned.fill(
-                                            child: AnimatedContainer(
-                                              duration: const Duration(milliseconds: 150),
+                                                                child: Container(
                                               decoration: BoxDecoration(
-                                                borderRadius: BorderRadius.circular(12),
-                                                border: Border.all(color: selected ? AppColors.primaryPurple : Colors.transparent, width: 2),
-                                                color: selected ? AppColors.primaryPurple.withOpacity(0.15) : Colors.transparent,
+                                                                    gradient: LinearGradient(
+                                                                      begin: Alignment.topLeft,
+                                                                      end: Alignment.bottomRight,
+                                                                      colors: [
+                                                                        AppColors.primaryPurple.withOpacity(0.2),
+                                                                        AppColors.primaryBlue.withOpacity(0.1),
+                                                                      ],
                                               ),
                                             ),
                                           ),
-                                          if (selected)
+                                                              ),
                                             Positioned(
-                                              right: 6,
-                                              top: 6,
+                                                                right: 8,
+                                                                top: 8,
                                               child: Container(
+                                                                  padding: const EdgeInsets.all(6),
                                                 decoration: BoxDecoration(
-                                                  color: AppColors.primaryPurple,
-                                                  borderRadius: BorderRadius.circular(999),
+                                                                    gradient: AppGradients.primary,
+                                                                    shape: BoxShape.circle,
                                                   boxShadow: [
-                                                    BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 3)),
-                                                  ],
-                                                ),
-                                                padding: const EdgeInsets.all(4),
-                                                child: const Icon(Icons.check_rounded, color: Colors.white, size: 14),
-                                              ),
-                                            ),
-                                        ],
+                                                                      BoxShadow(
+                                                                        color: AppColors.primaryPurple.withOpacity(0.4),
+                                                                        blurRadius: 8,
+                                                                        offset: const Offset(0, 2),
+                                                                      ),
+                                                                    ],
+                                                                  ),
+                                                                  child: const Icon(
+                                                                    Icons.check_rounded, 
+                                                                    color: Colors.white, 
+                                                                    size: 14,
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                            ],
+                                                          ],
+                                                        ),
+                                                      ),
                                       ),
                                     );
                                   },
                                 ),
                               ),
-                            const SizedBox(height: 8),
-                            OutlinedButton.icon(
+                                            const SizedBox(height: 16),
+                                          ],
+                                          Container(
+                                            width: double.infinity,
+                                            decoration: BoxDecoration(
+                                              gradient: LinearGradient(
+                                                colors: [
+                                                  AppColors.muted(context).withOpacity(0.6),
+                                                  AppColors.surface(context).withOpacity(0.4),
+                                                ],
+                                              ),
+                                              borderRadius: BorderRadius.circular(16),
+                                              border: Border.all(
+                                                color: AppColors.primaryPurple.withOpacity(0.1),
+                                                width: 1,
+                                              ),
+                                            ),
+                                            child: OutlinedButton.icon(
                               onPressed: () async {
                                 // Let user upload a new reference from gallery; on success, refresh list and select it
                                 try {
@@ -2226,20 +4954,99 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                                   setSheetState(() {});
                                 } catch (_) {}
                               },
-                              icon: const Icon(Icons.photo_library_rounded),
-                              label: const Text('Upload from gallery'),
+                                              icon: Icon(
+                                                Icons.photo_library_rounded,
+                                                color: AppColors.primaryPurple,
+                                              ),
+                                              label: Text(
+                                                'Upload from gallery',
+                                                style: GoogleFonts.inter(
+                                                  color: AppColors.primaryPurple,
+                                                  fontWeight: FontWeight.w600,
+                                                  fontSize: 14,
+                                                ),
+                                              ),
+                                              style: OutlinedButton.styleFrom(
+                                                backgroundColor: Colors.transparent,
+                                                side: BorderSide.none,
+                                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                                shape: RoundedRectangleBorder(
+                                                  borderRadius: BorderRadius.circular(16),
+                                                ),
+                                              ),
+                                            ),
                             ),
                           ],
                         );
                       },
                     ),
-                    if (errorText != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(errorText!, style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12)),
-                      ),
-                    const SizedBox(height: 14),
-                    ElevatedButton.icon(
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (errorText != null) ...[
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.redAccent.withOpacity(0.2),
+                                  width: 1,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.error_outline_rounded,
+                                    color: Colors.redAccent,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      errorText!,
+                                      style: GoogleFonts.inter(
+                                        color: Colors.redAccent,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 32),
+                          // Action Button
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: canStart() 
+                                ? LinearGradient(
+                                    colors: [
+                                      AppColors.primaryPurple,
+                                      AppColors.primaryBlue,
+                                    ],
+                                  )
+                                : LinearGradient(
+                                    colors: [
+                                      AppColors.muted(context).withOpacity(0.3),
+                                      AppColors.muted(context).withOpacity(0.2),
+                                    ],
+                                  ),
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                if (canStart()) ...[
+                                  BoxShadow(
+                                    color: AppColors.primaryPurple.withOpacity(0.4),
+                                    blurRadius: 16,
+                                    offset: const Offset(0, 8),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            child: ElevatedButton.icon(
                       onPressed: canStart()
                           ? () {
                               Navigator.of(ctx).pop(_ElementsInput(
@@ -2248,20 +5055,50 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                               ));
                             }
                           : null,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('Start Elements'),
-                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Powered by Nano Banana Edit',
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
-                    ),
-                  ],
+                              icon: Icon(
+                                Icons.auto_awesome_mosaic_rounded,
+                                color: canStart() ? Colors.white : AppColors.mutedText(context),
+                              ),
+                              label: Text(
+                                'Start Elements',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.transparent,
+                                foregroundColor: canStart() ? Colors.white : AppColors.mutedText(context),
+                                shadowColor: Colors.transparent,
+                                padding: const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                              // Footer
+                              Center(
+                                child: Text(
+                                  'Powered by Nano Banana Edit',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.mutedText(context),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
-              );
-            },
+              ),
+            ),
           ),
         );
       },
@@ -2282,6 +5119,51 @@ class _ElementsInput {
   final String prompt;
   final String referenceUrl;
   const _ElementsInput({required this.prompt, required this.referenceUrl});
+}
+
+class _FullImagePreview extends StatelessWidget {
+  final Uint8List bytes;
+  const _FullImagePreview({required this.bytes});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(),
+      backgroundColor: Colors.black,
+      body: Center(
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 5,
+          child: Image.memory(bytes, fit: BoxFit.contain, filterQuality: FilterQuality.high),
+        ),
+      ),
+    );
+  }
+}
+
+class _ExportFab extends StatelessWidget {
+  final bool enabled;
+  final VoidCallback onTap;
+  const _ExportFab({required this.enabled, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: enabled ? 1 : 0.6,
+      child: GestureDetector(
+        onTap: enabled ? onTap : null,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: enabled ? AppGradients.primary : AppGradients.blueToPurple,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [mediaPetShadow(context)],
+          ),
+          child: const Icon(Icons.ios_share_rounded, color: Colors.white, size: 24),
+        ),
+      ),
+    );
+  }
 }
 
 
