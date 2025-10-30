@@ -21,9 +21,9 @@ class MediaRepository {
       Logger.info('Uploading to storage', context: {'bucket': bucket, 'path': path});
       await _client.storage.from(bucket).uploadBinary(path, bytes, fileOptions: FileOptions(contentType: contentType, upsert: false));
     });
-    // Prefer signed URLs for private buckets
-    final signed = await _client.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7); // 7 days
-    return signed;
+    // Use public URLs that never expire (RLS policies still protect access)
+    final publicUrl = _client.storage.from(bucket).getPublicUrl(path);
+    return publicUrl;
   }
 
   String _generateChecksum(Uint8List bytes) {

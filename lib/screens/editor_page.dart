@@ -176,18 +176,20 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         if (job.status == 'completed' && job.resultUrl != null) {
           try {
             if (job.toolName == 'nano_banana') {
-              final Uri uri = Uri.parse(job.resultUrl!);
-              final http.Response resp = await http.get(uri);
-              if (resp.statusCode == 200 && resp.bodyBytes.isNotEmpty) {
-                if (!mounted) return;
-                setState(() {
-                  _nanoResultBytes = resp.bodyBytes;
-                  if (_currentNanoJobId == job.id) {
-                    _nanoIsGenerating = false;
-                  }
-                });
-                // Inline panel is bound to state; no dialog refresh needed
-              }
+              // Update main editor image automatically like other tools
+              _originalOrLastUrl = job.resultUrl;
+              await _loadAndDownscaleImage(job.resultUrl!);
+              if (!mounted) return;
+              setState(() {
+                _nanoResultBytes = _imageBytes; // Store for potential panel display
+                if (_currentNanoJobId == job.id) {
+                  _nanoIsGenerating = false;
+                }
+                _saving = _activeJobIds.isNotEmpty;
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Remix result applied')),
+              );
             } else {
               _originalOrLastUrl = job.resultUrl;
               await _loadAndDownscaleImage(job.resultUrl!);
@@ -1107,7 +1109,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 bytes,
                 source: 'manual',
                 toolIdName: 'manual_editor',
-                editName: 'Manual Editor',
+                editName: 'Manual Editor Session',
                 parameters: {
                   'editor': 'ProImageEditor',
                   'notes': 'Exported from manual tab',
@@ -1260,8 +1262,21 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Future<void> _openVersions() async {
     try {
       final edits = await _editsRepo.listForProject(widget.projectId, limit: 50);
-      final project = await _projectsRepo.getById(widget.projectId);
-      final String? originalUrl = project?.originalImageUrl;
+      
+      // Reorder list to put "Initial Import" at the top
+      final reorderedEdits = <dynamic>[];
+      dynamic initialImport;
+      for (final edit in edits) {
+        if (edit.editName == 'Initial Import') {
+          initialImport = edit;
+        } else {
+          reorderedEdits.add(edit);
+        }
+      }
+      if (initialImport != null) {
+        reorderedEdits.insert(0, initialImport);
+      }
+      
       if (!mounted) return;
       // ignore: use_build_context_synchronously
       await showModalBottomSheet(
@@ -1271,45 +1286,12 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         builder: (_) {
           return SafeArea(
             child: ListView.builder(
-              itemCount: edits.length + ((originalUrl != null && originalUrl.isNotEmpty) ? 1 : 0),
+              itemCount: reorderedEdits.length,
               itemBuilder: (ctx, i) {
-                final bool hasOriginal = originalUrl != null && originalUrl.isNotEmpty;
-                if (hasOriginal && i == 0) {
-                  // Pinned original image entry
-                  return ListTile(
-                    leading: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.network(
-                        originalUrl,
-                        width: 48,
-                        height: 48,
-                        fit: BoxFit.cover,
-                        errorBuilder: (c, err, st) => Container(
-                          width: 48,
-                          height: 48,
-                          color: AppColors.muted(context),
-                          child: Icon(Icons.image_outlined, color: AppColors.secondaryText(context), size: 20),
-                        ),
-                      ),
-                    ),
-                    title: Text('Original image', style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w700)),
-                    subtitle: Text('Pinned', style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12)),
-                    trailing: const Icon(Icons.push_pin, size: 18),
-                    onTap: () async {
-                      Navigator.of(ctx).pop();
-                      setState(() {
-                        _originalOrLastUrl = originalUrl;
-                        _loading = true;
-                        _error = null;
-                      });
-                      await _loadAndDownscaleImage(originalUrl);
-                    },
-                  );
-                }
-
-                final int idx = hasOriginal ? i - 1 : i;
-                final e = edits[idx];
+                final e = reorderedEdits[i];
                 final thumbUrl = e.outputImageUrl ?? e.inputImageUrl;
+                final bool isInitialImport = e.editName == 'Initial Import';
+                
                 return ListTile(
                   leading: ClipRRect(
                     borderRadius: BorderRadius.circular(8),
@@ -1333,8 +1315,12 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                             child: Icon(Icons.image_outlined, color: AppColors.secondaryText(context), size: 20),
                           ),
                   ),
-                  title: Text(e.editName, style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: FontWeight.w600)),
-                  subtitle: Text(e.createdAt.toLocal().toString(), style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12)),
+                  title: Text(e.editName, style: GoogleFonts.inter(color: AppColors.onBackground(context), fontWeight: isInitialImport ? FontWeight.w700 : FontWeight.w600)),
+                  subtitle: Text(
+                    isInitialImport ? 'Pinned' : e.createdAt.toLocal().toString(),
+                    style: GoogleFonts.inter(color: AppColors.secondaryText(context), fontSize: 12),
+                  ),
+                  trailing: isInitialImport ? const Icon(Icons.push_pin, size: 18) : null,
                   onTap: () async {
                     final url = e.outputImageUrl ?? e.inputImageUrl;
                     if (url != null) {
@@ -1360,7 +1346,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     Uint8List bytes, {
     String source = 'manual',
     String toolIdName = 'manual_editor',
-    String editName = 'Manual Editor',
+    String editName = 'Manual Editor Session',
     Map<String, dynamic>? parameters,
   }) async {
     if (!mounted) return;
@@ -1457,7 +1443,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
 
   Widget _aiChip(IconData icon, String label, VoidCallback onPressed) {
     return SizedBox(
-      width: 80,
+      width: 85,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
@@ -1557,8 +1543,8 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     await _handleSave(
       _imageBytes!,
       source: 'ai',
-      toolIdName: action?.toolIdName ?? 'ai_editor',
-      editName: action?.editName ?? 'AI Editor',
+      toolIdName: action?.toolIdName ?? 'nano_banana',
+      editName: action?.editName ?? 'nano_banana',
       parameters: {
         'editor': 'AI',
         if (action != null) ...action.parameters,
@@ -2068,21 +2054,6 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     );
 
     return result;
-  }
-
-  // ignore: unused_element
-  Future<void> _onIdeogramEdit() async {
-    if (_imageBytes == null) return;
-    _pushAiUndo(_imageBytes!);
-    _lastAiAction = const _AiActionMeta(
-      toolIdName: 'ideogram_v3_edit',
-      editName: 'ideogram/v3/edit',
-      parameters: {
-        'tool': 'ideogram_v3_edit',
-      },
-    );
-    // TODO: Call ideogram/v3/edit
-    setState(() {});
   }
 
   // Style Transfer UI

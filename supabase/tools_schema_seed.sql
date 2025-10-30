@@ -11,11 +11,7 @@ create table if not exists public.tools (
 -- Seed minimal manual tools (idempotent)
 insert into public.tools (name, display_name, type, credit_cost, tier_minimum)
 values
-  ('manual_editor', 'Manual Editor Session', 'manual', 0, 'free_trial'),
-  ('crop_rotate', 'Crop & Rotate', 'manual', 0, 'free_trial'),
-  ('adjust', 'Adjust (B/C/S)', 'manual', 0, 'free_trial'),
-  ('add_text', 'Add Text', 'manual', 0, 'free_trial'),
-  ('filters', 'Filters', 'manual', 0, 'free_trial')
+  ('manual_editor', 'Manual Editor Session', 'manual', 0, 'free_trial')
 on conflict (name) do update set
   display_name = excluded.display_name,
   type = excluded.type,
@@ -26,17 +22,14 @@ on conflict (name) do update set
 -- Seed AI tools (idempotent)
 insert into public.tools (name, display_name, type, credit_cost, tier_minimum)
 values
-  ('ai_editor', 'AI Editor Session', 'ai', 0, 'free_trial'),
-  ('nano_banana', 'nano_banana', 'ai', 0, 'free_trial'),
-  ('elements', 'Elements Remix', 'ai', 0, 'free_trial'),
   ('remove_background', 'Remove Background', 'ai', 0, 'free_trial'),
-  ('magic_eraser', 'Magic Eraser', 'ai', 0, 'free_trial'),
-  ('ai_style', 'AI Style Transform', 'ai', 0, 'free_trial'),
-  ('ideogram_v3_edit', 'ideogram/v3/edit', 'ai', 0, 'free_trial'),
-  ('ideogram_character_edit', 'ideogram/character_edit', 'ai', 0, 'free_trial'),
+  ('nano_banana', 'nano_banana', 'ai', 0, 'free_trial'),
   ('ideogram_v3_reframe', 'ideogram/v3/reframe', 'ai', 0, 'free_trial'),
-  ('calligrapher', 'Calligrapher Text Edit', 'ai', 0, 'free_trial'),
-  ('seedvr_upscale', 'SeedVR2 Upscale', 'ai', 0, 'free_trial')
+  ('elements', 'Elements Remix', 'ai', 0, 'free_trial'),
+  ('style_transfer', 'Style Transfer', 'ai', 0, 'free_trial'),
+  ('seedvr_upscale', 'SeedVR2 Upscale', 'ai', 0, 'free_trial'),
+  ('ideogram_character_remix', 'ideogram/character/remix', 'ai', 0, 'free_trial'),
+  ('calligrapher', 'Calligrapher Text Edit', 'ai', 0, 'free_trial')
 on conflict (name) do update set
   display_name = excluded.display_name,
   type = excluded.type,

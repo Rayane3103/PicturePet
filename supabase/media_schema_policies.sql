@@ -1,8 +1,9 @@
 -- Buckets (create via dashboard if needed): media
--- Ensure the 'media' bucket exists (private). Safe to run multiple times.
+-- Ensure the 'media' bucket exists (public). Safe to run multiple times.
+-- Public bucket allows non-expiring URLs while RLS policies still protect access
 insert into storage.buckets (id, name, public)
-values ('media', 'media', false)
-on conflict (id) do nothing;
+values ('media', 'media', true)
+on conflict (id) do update set public = true;
 
 -- Media table
 create table if not exists public.media (
