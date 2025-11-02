@@ -365,6 +365,7 @@ class _LibraryPageState extends State<LibraryPage> {
     final progress = (e['progress'] as num?)?.toDouble();
     final isFailed = type == 'failed';
     final isOffline = (e['code'] as String?) == 'offline';
+    final isPreparing = type == 'preparing';
 
     return Container(
       height: 300,
@@ -396,25 +397,32 @@ class _LibraryPageState extends State<LibraryPage> {
                           width: 72,
                           height: 72,
                           child: CircularProgressIndicator(
-                            value: progress,
+                            value: isPreparing ? null : progress,
                             strokeWidth: 6,
                             color: AppColors.primaryPurple,
                             backgroundColor: AppColors.surface(context),
                           ),
                         ),
-                        Text(
-                          progress != null ? '${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%' : '...%',
-                          style: GoogleFonts.inter(
-                            color: AppColors.onBackground(context),
-                            fontWeight: FontWeight.w700,
+                        if (isPreparing)
+                          Icon(
+                            Icons.auto_awesome,
+                            color: AppColors.primaryPurple,
+                            size: 32,
+                          )
+                        else
+                          Text(
+                            progress != null ? '${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%' : '...%',
+                            style: GoogleFonts.inter(
+                              color: AppColors.onBackground(context),
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Uploading',
+                    isPreparing ? 'Generating...' : 'Uploading',
                     style: GoogleFonts.inter(
                       color: AppColors.onBackground(context),
                       fontWeight: FontWeight.w600,
@@ -473,7 +481,7 @@ class _LibraryPageState extends State<LibraryPage> {
   Widget _grid() {
     // Build a combined list: uploading placeholders first, then projects
     final placeholders = _uploadStatuses
-        .where((e) => e['type'] == 'progress' || e['type'] == 'started' || e['type'] == 'failed')
+        .where((e) => e['type'] == 'progress' || e['type'] == 'started' || e['type'] == 'failed' || e['type'] == 'preparing')
         .toList();
 
     // Show empty state only if nothing is uploading and there are no projects
@@ -683,93 +691,6 @@ class _LibraryPageState extends State<LibraryPage> {
         ),
         
       ],
-    );
-  }
-
-  Widget _buildUploadStatusBar(BuildContext context) {
-    if (_uploadStatuses.isEmpty) return const SizedBox.shrink();
-    final e = _uploadStatuses.first; // show latest
-    final type = e['type'] as String?;
-    final filename = (e['filename'] as String?) ?? '';
-    final progress = (e['progress'] as num?)?.toDouble();
-
-    String title;
-    Color barColor;
-    bool showProgress = false;
-    double? progressValue;
-    IconData icon;
-
-    if (type == 'failed') {
-      title = 'Upload failed: $filename';
-      barColor = Colors.red;
-      icon = Icons.error_outline;
-    } else if (type == 'completed') {
-      title = 'Upload complete: $filename';
-      barColor = Colors.green;
-      icon = Icons.check_circle_outline;
-    } else if (type == 'progress') {
-      final pct = progress != null ? (progress * 100).clamp(0, 100).toStringAsFixed(0) : '...';
-      title = 'Uploading: $filename  ($pct%)';
-      barColor = AppColors.primaryPurple;
-      showProgress = true;
-      progressValue = progress;
-      icon = Icons.cloud_upload_outlined;
-    } else if (type == 'started') {
-      title = 'Uploading: $filename';
-      barColor = AppColors.primaryPurple;
-      showProgress = true;
-      progressValue = null; // indeterminate
-      icon = Icons.cloud_upload_outlined;
-    } else {
-      return const SizedBox.shrink();
-    }
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: AppColors.card(context),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.muted(context)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, size: 18, color: AppColors.onBackground(context)),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: GoogleFonts.inter(
-                      color: AppColors.onBackground(context),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-            if (showProgress) ...[
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: progressValue,
-                  minHeight: 6,
-                  backgroundColor: AppColors.muted(context),
-                  valueColor: AlwaysStoppedAnimation<Color>(barColor),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
     );
   }
 

@@ -250,12 +250,21 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _generateWithAi(String prompt) async {
     if (_aiGenerating) return;
     setState(() => _aiGenerating = true);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Generating image with AI...')));
+    final filename = 'imagen4_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    
+    // Immediately emit a "preparing" event so the library shows a loading card
+    UploadQueueService.instance.emitEvent({'type': 'preparing', 'filename': filename});
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Generating image with AI...'),
+        duration: Duration(seconds: 2), // Shorter duration since we have the card now
+      ),
+    );
     try {
       final bytes = await _fal.imagen4Generate(prompt: prompt);
       final compressed = await compressImage(bytes, quality: 90);
       final thumb = await generateThumbnail(compressed, size: 384, quality: 75);
-      final filename = 'imagen4_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final projectName = _deriveProjectNameFromPrompt(prompt);
       UploadQueueService.instance.enqueue(UploadTask(
         bytes: compressed,
@@ -270,6 +279,8 @@ class _HomeShellState extends State<HomeShell> {
         projectName: projectName,
       ));
     } catch (e) {
+      // Remove the preparing status on failure
+      UploadQueueService.instance.emitEvent({'type': 'failed', 'filename': filename, 'error': e.toString()});
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('AI generation failed: $e')));
     } finally {
       if (mounted) setState(() => _aiGenerating = false);

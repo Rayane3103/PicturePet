@@ -302,6 +302,98 @@ class FalAiService {
     return 'image/jpeg';
   }
 
+  /// Calls fal-ai/ideogram/character/edit with image, mask, and prompt
+  /// Returns the generated image bytes with character edits applied
+  Future<Uint8List> ideogramCharacterEdit({
+    required Uint8List inputImageBytes,
+    required Uint8List maskImageBytes,
+    required String prompt,
+  }) async {
+    try {
+      final String apiKey = FalConfig.apiKey;
+      if (apiKey.isEmpty) {
+        throw Exception(
+            'FAL_API_KEY is missing. Please configure it securely via server-side proxy');
+      }
+
+      // Convert images to data URLs
+      final String imageMime = _detectMimeType(inputImageBytes);
+      final String imageDataUrl = 'data:$imageMime;base64,${base64Encode(inputImageBytes)}';
+      
+      final String maskMime = _detectMimeType(maskImageBytes);
+      final String maskDataUrl = 'data:$maskMime;base64,${base64Encode(maskImageBytes)}';
+
+      final Uri uri = Uri.parse('https://queue.fal.run/fal-ai/ideogram/character/edit');
+
+      final Map<String, String> headers = <String, String>{
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': 'Key $apiKey',
+      };
+
+      // According to the fal.ai API, this endpoint expects:
+      // - prompt: text describing the desired edit
+      // - image_url: the original image
+      // - mask_url: the mask image (white = edit area, black = keep)
+      final Map<String, dynamic> body = <String, dynamic>{
+        'prompt': prompt,
+        'image_url': imageDataUrl,
+        'mask_url': maskDataUrl,
+      };
+
+      final http.Response resp = await _client.post(
+        uri,
+        headers: headers,
+        body: jsonEncode(body),
+      );
+
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        Logger.error('fal.ai ideogramCharacterEdit HTTP error', context: {
+          'statusCode': resp.statusCode,
+          'body': resp.body,
+        });
+        throw Exception('fal.ai error ${resp.statusCode}: ${resp.body}');
+      }
+
+      final Map<String, dynamic> json =
+          jsonDecode(resp.body) as Map<String, dynamic>;
+
+      // Try to get image from response
+      final dynamic images = json['images'];
+      if (images is List && images.isNotEmpty) {
+        final dynamic first = images.first;
+        if (first is Map<String, dynamic>) {
+          final String? url = first['url'] as String?;
+          if (url != null && url.isNotEmpty) {
+            final http.Response imgResp = await _client.get(Uri.parse(url));
+            if (imgResp.statusCode == 200) {
+              return imgResp.bodyBytes;
+            }
+            Logger.error('fal.ai ideogramCharacterEdit image fetch failed', context: {
+              'statusCode': imgResp.statusCode,
+            });
+            throw Exception(
+                'Failed to fetch generated image: HTTP ${imgResp.statusCode}');
+          }
+        }
+      }
+
+      // Fallback: check for image as data URL
+      final String? imageDataUrlStr = json['image'] as String?;
+      if (imageDataUrlStr != null && imageDataUrlStr.startsWith('data:')) {
+        return _decodeDataUrl(imageDataUrlStr);
+      }
+
+      throw Exception('fal.ai response did not contain an image');
+    } catch (e, st) {
+      Logger.error('fal.ai ideogramCharacterEdit exception', context: {
+        'error': e.toString(),
+        'stack': st.toString(),
+      });
+      rethrow;
+    }
+  }
+
   Uint8List _decodeDataUrl(String dataUrl) {
     final int comma = dataUrl.indexOf(',');
     if (comma == -1) throw Exception('Invalid data URL');

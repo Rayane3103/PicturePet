@@ -29,6 +29,8 @@ import '../utils/export_utils.dart';
 import 'package:share_plus/share_plus.dart';
 import 'dart:math' as math;
 import 'package:permission_handler/permission_handler.dart';
+import '../widgets/mask_brush_painter.dart';
+import 'package:image_picker/image_picker.dart';
 
 class _AllowAllScrollBehavior extends ScrollBehavior {
   const _AllowAllScrollBehavior();
@@ -162,17 +164,18 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       _jobUpdatesSub?.cancel();
       _jobUpdatesSub = AiJobsService.instance.jobUpdates.listen((AiJob job) async {
         if (job.projectId != widget.projectId) return;
-        // Clear global overlay for tracked jobs on completion/failure
+        
+        // Handle failed or cancelled jobs - remove from active jobs immediately
         if (_activeJobIds.contains(job.id) &&
-            (job.status == 'completed' || job.status == 'failed' || job.status == 'cancelled')) {
+            (job.status == 'failed' || job.status == 'cancelled')) {
           if (mounted) {
             setState(() {
               _activeJobIds.remove(job.id);
-              // Ensure global overlay hides when no active jobs remain
               _saving = _activeJobIds.isNotEmpty;
             });
           }
         }
+        
         if (job.status == 'completed' && job.resultUrl != null) {
           try {
             if (job.toolName == 'nano_banana') {
@@ -185,6 +188,8 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 if (_currentNanoJobId == job.id) {
                   _nanoIsGenerating = false;
                 }
+                // Now that image is loaded, remove from active jobs
+                _activeJobIds.remove(job.id);
                 _saving = _activeJobIds.isNotEmpty;
               });
               ScaffoldMessenger.of(context).showSnackBar(
@@ -194,8 +199,11 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
               _originalOrLastUrl = job.resultUrl;
               await _loadAndDownscaleImage(job.resultUrl!);
               if (!mounted) return;
-              // Best-effort: hide overlay once applied
-              setState(() { _saving = _activeJobIds.isNotEmpty; });
+              // Now that image is loaded and displayed, remove from active jobs
+              setState(() {
+                _activeJobIds.remove(job.id);
+                _saving = _activeJobIds.isNotEmpty;
+              });
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(behavior: SnackBarBehavior.floating, content: Text('AI result applied')),
               );
@@ -204,6 +212,13 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
             }
           } catch (e) {
             Logger.warn('Failed to apply AI job result', context: {'error': e.toString()});
+            // Remove from active jobs even on error
+            if (mounted) {
+              setState(() {
+                _activeJobIds.remove(job.id);
+                _saving = _activeJobIds.isNotEmpty;
+              });
+            }
           }
         } else if (job.status == 'failed') {
           // Print detailed error to console for easy copy/paste
@@ -216,7 +231,6 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
             'project_id': job.projectId,
           });
           if (_currentNanoJobId == job.id && mounted) setState(() { _nanoIsGenerating = false; });
-          if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -323,7 +337,43 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       body: Stack(
         children: [
           Positioned.fill(
-            child: _buildImage(),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _buildImage(),
+                // Blur overlay only on the image area
+                if (_saving || _activeJobIds.isNotEmpty)
+                  ClipRect(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+                      child: Container(
+                        color: Colors.black.withOpacity(0.3),
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const CircularProgressIndicator(
+                                strokeWidth: 3,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Loading...',
+                                style: GoogleFonts.poppins(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.white,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
           Positioned(
             right: 20,
@@ -335,14 +385,6 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
               ),
             ),
           ),
-          // Keep overlay visible while saving OR while any tracked background job is active
-          if (_saving || _activeJobIds.isNotEmpty)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black.withOpacity(0.35),
-                child: const Center(child: CircularProgressIndicator()),
-              ),
-            ),
         ],
       ),
       bottomNavigationBar: SafeArea(
@@ -790,12 +832,8 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                         const SizedBox(width: 8),
                         _aiChip(Icons.high_quality_rounded, 'Upscale', _onUpscale),
                         const SizedBox(width: 8),
-                        // _aiChip(Icons.auto_fix_high_rounded, 'Smart Edit', _onIdeogramEdit),
-                        // const SizedBox(width: 8),
-                        _aiChip(Icons.person_rounded, 'Character', _onIdeogramCharacterEdit),
+                        _aiChip(Icons.brush_rounded, 'Mask Edit', _onCharacterBrushEdit),
                         const SizedBox(width: 8),
-                        
-                        
                         _aiChip(Icons.text_fields_rounded, 'Text Edit', _onCalligrapher),
                         
                       ],
@@ -1100,6 +1138,30 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                 background: AppColors.background(context),
                 appBarBackground: AppColors.background(context),
                 appBarColor: AppColors.onBackground(context),
+              ),
+            ),
+            textEditor: TextEditorConfigs(
+              enabled: true,
+              showSelectFontStyleBottomBar: true, // Enable style picker
+              customTextStyles: [
+                // Single styles
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold), // Bold
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, fontStyle: FontStyle.italic), // Italic
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, decoration: TextDecoration.underline), // Underline
+                
+                // Combinations of 2
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold, fontStyle: FontStyle.italic), // Bold + Italic
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold, decoration: TextDecoration.underline), // Bold + Underline
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, fontStyle: FontStyle.italic, decoration: TextDecoration.underline), // Italic + Underline
+                
+                // Combination of 3
+                GoogleFonts.inter(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold, fontStyle: FontStyle.italic, decoration: TextDecoration.underline), // Bold + Italic + Underline
+              ],
+              style: TextEditorStyle(
+                background: Colors.black.withOpacity(0.7), // Semi-transparent to see image
+                appBarBackground: AppColors.background(context),
+                appBarColor: AppColors.onBackground(context),
+                bottomBarBackground: AppColors.surface(context),
               ),
             ),
           ),
@@ -2442,53 +2504,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   }
 
 
-  Future<void> _onIdeogramCharacterEdit() async {
-    if (_imageBytes == null) return;
-    // Collect prompt + references via a polished bottom sheet
-    final _CharacterRemixInput? remix = await _showCharacterRemixBottomSheet();
-    if (remix == null) return;
-
-    _pushAiUndo(_imageBytes!);
-    _lastAiAction = _AiActionMeta(
-      toolIdName: 'ideogram_character_remix',
-      editName: 'ideogram/character/remix',
-      parameters: {
-        'tool': 'ideogram_character_remix',
-        'prompt': remix.prompt,
-        'reference_count': remix.referenceUrls.length,
-      },
-    );
-
-    setState(() { _saving = true; });
-    try {
-      final job = await _aiJobsRepo.enqueueJob(
-        projectId: widget.projectId,
-        toolName: 'ideogram_character_remix',
-        payload: {
-          'prompt': remix.prompt,
-          'reference_urls': remix.referenceUrls,
-        },
-        inputImageUrl: _originalOrLastUrl,
-      );
-      if (mounted) setState(() { _activeJobIds.add(job.id); });
-      await AiJobsService.instance.triggerProcessing(job.id);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, content: Text('Character remix started')),
-      );
-    } catch (e) {
-      Logger.error('Queueing ideogram_character_remix failed', context: {'error': e.toString()});
-      if (!mounted) return;
-      setState(() { _error = 'Failed to start character remix: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
-    } finally {
-      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
-    }
-
-}
-
+  
  
 
   Future<void> _onElementsRemix() async {
@@ -2576,6 +2592,58 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       Logger.error('Queueing ideogram_v3_reframe failed', context: {'error': e.toString()});
       if (!mounted) return;
       setState(() { _error = 'Failed to start reframe: ${e.toString()}'; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
+      );
+    } finally {
+      if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
+    }
+  }
+
+  Future<void> _onCharacterBrushEdit() async {
+    if (_imageBytes == null) return;
+    
+    // Collect prompt and mask via brush painter
+    final _CharacterEditInput? input = await _showCharacterEditBottomSheet();
+    if (input == null) return;
+
+    _pushAiUndo(_imageBytes!);
+    _lastAiAction = _AiActionMeta(
+      toolIdName: 'ideogram_character_edit',
+      editName: 'Character Edit (Mask)',
+      parameters: {
+        'tool': 'ideogram_character_edit',
+        'prompt': input.prompt,
+        'reference_count': input.referenceUrls.length,
+      },
+    );
+
+    setState(() { _saving = true; });
+    try {
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: widget.projectId,
+        toolName: 'ideogram_character_edit',
+        payload: {
+          'prompt': input.prompt,
+          'mask_url': input.maskUrl,
+          'reference_urls': input.referenceUrls,
+        },
+        inputImageUrl: _originalOrLastUrl,
+      );
+      if (mounted) setState(() { _activeJobIds.add(job.id); });
+      await AiJobsService.instance.triggerProcessing(job.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          behavior: SnackBarBehavior.floating, 
+          content: Text('Character edit started'),
+          duration: Duration(seconds: 5),
+        ),
+      );
+    } catch (e) {
+      Logger.error('Queueing ideogram_character_edit failed', context: {'error': e.toString()});
+      if (!mounted) return;
+      setState(() { _error = 'Failed to start character edit: ${e.toString()}'; });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
       );
@@ -3770,6 +3838,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       if (mounted) {
         setState(() {
           _currentNanoJobId = job.id;
+          _activeJobIds.add(job.id);
         });
         // Inline panel auto-rebuilds via setState
       }
@@ -3786,8 +3855,15 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       if (!mounted) return;
       setState(() {
         _nanoError = e.toString();
+        _nanoIsGenerating = false;
       });
-    } finally {}
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = _activeJobIds.isNotEmpty;
+        });
+      }
+    }
   }
 
   // Removed Replace Original action per request
@@ -3887,562 +3963,545 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         labelStyle: GoogleFonts.inter(color: AppColors.onBackground(context), fontSize: 12),
         selectedShadowColor: Colors.transparent,
       ),
+      inputDecorationTheme: InputDecorationTheme(
+        border: InputBorder.none,
+        enabledBorder: InputBorder.none,
+        focusedBorder: InputBorder.none,
+        errorBorder: InputBorder.none,
+        focusedErrorBorder: InputBorder.none,
+        filled: false,
+      ),
     );
   }
 
   // Character Remix UI
-  Future<_CharacterRemixInput?> _showCharacterRemixBottomSheet() async {
+ 
+  // Character Edit with Brush Mask
+  Future<_CharacterEditInput?> _showCharacterEditBottomSheet() async {
+    if (_imageBytes == null) return null;
+
     final TextEditingController promptCtrl = TextEditingController();
-    final Color onBg = AppColors.onBackground(context);
-
-    // Load user's recent images to use as references
-    late Future<List<MediaItem>> mediaFuture;
-    mediaFuture = _mediaRepo.listMedia(limit: 60, filterMime: 'image');
-
-    // Local selection state inside the sheet
-    final Set<String> selectedUrls = <String>{};
-    String? errorText;
-
-    bool canStart() => promptCtrl.text.trim().isNotEmpty && selectedUrls.isNotEmpty;
-
-    final _CharacterRemixInput? result = await showModalBottomSheet<_CharacterRemixInput>(
+    final Set<String> selectedReferenceUrls = <String>{};
+    
+    // Step 1: Show prompt + reference selection sheet
+    bool isUploading = false;
+    
+    final bool? continueWithMask = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
-        return Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                AppColors.card(context).withOpacity(0.95),
-                AppColors.background(context).withOpacity(0.98),
-              ],
-            ),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-            border: Border.all(
-              color: AppColors.primaryPurple.withOpacity(0.1),
-              width: 1,
-            ),
-          ),
-          child: ClipRRect(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-              child: SafeArea(
-                child: StatefulBuilder(
-                  builder: (ctx, setSheetState) {
-                    return ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: MediaQuery.of(ctx).size.height * 0.9,
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+              ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    AppColors.card(context).withOpacity(0.95),
+                    AppColors.background(context).withOpacity(0.98),
+                  ],
+                ),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+                border: Border.all(
+                  color: AppColors.primaryPurple.withOpacity(0.1),
+                  width: 1,
+                ),
+              ),
+              child: ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Fixed header
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            // Handle bar
+                            Center(
+                              child: Container(
+                                width: 40,
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  color: AppColors.muted(context).withOpacity(0.4),
+                                  borderRadius: BorderRadius.circular(2),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            // Header
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: [AppColors.primaryPurple, AppColors.primaryBlue],
+                                    ),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(Icons.brush, color: Colors.white, size: 20),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Character Edit',
+                                        style: GoogleFonts.inter(
+                                          color: AppColors.onBackground(context),
+                                          fontWeight: FontWeight.w800,
+                                          fontSize: 20,
+                                        ),
+                                      ),
+                                      Text(
+                                        'Mask-based character editing',
+                                        style: GoogleFonts.inter(
+                                          color: AppColors.secondaryText(context),
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: Icon(Icons.close_rounded, color: AppColors.secondaryText(context)),
+                                  onPressed: () => Navigator.of(ctx).pop(false),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                      child: SingleChildScrollView(
-                        child: Padding(
+                      // Scrollable content
+                      Flexible(
+                        child: SingleChildScrollView(
                           padding: EdgeInsets.only(
                             left: 24,
                             right: 24,
-                            top: 20,
                             bottom: 24 + MediaQuery.of(ctx).viewInsets.bottom,
                           ),
                           child: Column(
-                            mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              // Handle bar
-                              Center(
-                                child: Container(
-                                  width: 40,
-                                  height: 4,
-                                  decoration: BoxDecoration(
-                                    color: AppColors.muted(context).withOpacity(0.4),
-                                    borderRadius: BorderRadius.circular(2),
+                              // Prompt input
+                              Text(
+                                'What would you like to edit?',
+                                style: GoogleFonts.inter(
+                                  color: AppColors.onBackground(context),
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 15,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: AppColors.surface(context),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: AppColors.muted(context).withOpacity(0.3),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: TextField(
+                                  controller: promptCtrl,
+                                  maxLines: 2,
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.onBackground(context),
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: 'e.g., "woman holding bag"...',
+                                    hintStyle: GoogleFonts.inter(
+                                      color: AppColors.secondaryText(context),
+                                      fontSize: 13,
+                                    ),
+                                    border: InputBorder.none,
+                                    contentPadding: const EdgeInsets.all(12),
                                   ),
                                 ),
                               ),
-                              const SizedBox(height: 24),
-                              // Header
+                              const SizedBox(height: 16),
+                              // Reference images section  
+                              Text(
+                                'Reference images (1-4 required)',
+                                style: GoogleFonts.inter(
+                                  color: AppColors.onBackground(context),
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 15,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
                               Row(
                                 children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      gradient: LinearGradient(
-                                        colors: [
-                                          AppColors.accentPurple,
-                                          AppColors.primaryPurple,
-                                        ],
-                                      ),
-                                      shape: BoxShape.circle,
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: AppColors.accentPurple.withOpacity(0.3),
-                                          blurRadius: 12,
-                                          offset: const Offset(0, 4),
-                                        ),
-                                      ],
-                                    ),
-                                    child: const Icon(
-                                      Icons.person_rounded, 
-                                      color: Colors.white, 
-                                      size: 24,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
                                   Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'Character Remix',
-                                          style: GoogleFonts.inter(
-                                            color: onBg,
-                                            fontWeight: FontWeight.w800,
-                                            fontSize: 24,
-                                            letterSpacing: 0.25,
-                                          ),
-                                        ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      'Transform characters with reference images',
+                                    child: Text(
+                                      'Images showing the character to preserve',
                                       style: GoogleFonts.inter(
                                         color: AppColors.secondaryText(context),
-                                        fontWeight: FontWeight.w500,
-                                        fontSize: 14,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  OutlinedButton.icon(
+                                    onPressed: isUploading ? null : () async {
+                                      if (selectedReferenceUrls.length >= 4) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Maximum 4 references allowed'),
+                                            behavior: SnackBarBehavior.floating,
+                                          ),
+                                        );
+                                        return;
+                                      }
+                                      
+                                      try {
+                                        // Pick image from gallery
+                                        final ImagePicker picker = ImagePicker();
+                                        final XFile? image = await picker.pickImage(
+                                          source: ImageSource.gallery,
+                                          maxWidth: 2048,
+                                          maxHeight: 2048,
+                                        );
+                                        
+                                        if (image == null) return;
+                                        
+                                        // Set uploading state
+                                        setModalState(() => isUploading = true);
+                                        
+                                        // Upload to storage
+                                        final bytes = await image.readAsBytes();
+                                        final uploaded = await _mediaRepo.uploadBytes(
+                                          bytes: bytes,
+                                          filename: 'ref_${DateTime.now().millisecondsSinceEpoch}.jpg',
+                                          contentType: 'image/jpeg',
+                                          thumbnailBytes: bytes,
+                                          metadata: {'type': 'reference', 'tool': 'character_edit'},
+                                        );
+                                        
+                                        // Add to selected references
+                                        if (!mounted) return;
+                                        setModalState(() {
+                                          isUploading = false;
+                                          selectedReferenceUrls.add(uploaded.url);
+                                        });
+                                        
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('✓ Reference added'),
+                                            behavior: SnackBarBehavior.floating,
+                                            duration: Duration(seconds: 1),
+                                          ),
+                                        );
+                                      } catch (e) {
+                                        if (!mounted) return;
+                                        setModalState(() => isUploading = false);
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(
+                                            content: Text('Failed to upload: $e'),
+                                            backgroundColor: Colors.redAccent,
+                                            behavior: SnackBarBehavior.floating,
+                                          ),
+                                        );
+                                      }
+                                    },
+                                    icon: isUploading 
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : const Icon(Icons.add_photo_alternate, size: 16),
+                                    label: Text(
+                                      isUploading ? 'Uploading...' : 'Upload',
+                                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      side: BorderSide(color: AppColors.primaryPurple),
+                                      foregroundColor: AppColors.primaryPurple,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Container(
+                                height: 160,
+                                decoration: BoxDecoration(
+                                  color: AppColors.surface(context),
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(
+                                    color: AppColors.muted(context).withOpacity(0.3),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: FutureBuilder<List<MediaItem>>(
+                                  future: _mediaRepo.listMedia(limit: 60, filterMime: 'image'),
+                                  builder: (context, snapshot) {
+                                    if (snapshot.connectionState == ConnectionState.waiting) {
+                                      return const Center(child: CircularProgressIndicator());
+                                    }
+                                    if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                                      return Center(
+                                        child: Text(
+                                          'No images in library',
+                                          style: GoogleFonts.inter(
+                                            color: AppColors.secondaryText(context),
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                    final items = snapshot.data!;
+                                    return GridView.builder(
+                                      padding: const EdgeInsets.all(8),
+                                                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                        crossAxisCount: 5,
+                                        crossAxisSpacing: 6,
+                                        mainAxisSpacing: 6,
+                                      ),
+                                      itemCount: items.length,
+                                      itemBuilder: (c, i) {
+                                        final item = items[i];
+                                        final url = item.thumbnailUrl ?? item.url;
+                                        final selected = selectedReferenceUrls.contains(url);
+                                        return GestureDetector(
+                                          onTap: () {
+                                            setModalState(() {
+                                              if (selected) {
+                                                selectedReferenceUrls.remove(url);
+                                              } else {
+                                                if (selectedReferenceUrls.length >= 4) {
+                                                  ScaffoldMessenger.of(c).showSnackBar(
+                                                    const SnackBar(
+                                                      content: Text('Maximum 4 references allowed'),
+                                                      behavior: SnackBarBehavior.floating,
+                                                    ),
+                                                  );
+                                                } else {
+                                                  selectedReferenceUrls.add(url);
+                                                }
+                                              }
+                                            });
+                                          },
+                                          child: Stack(
+                                            children: [
+                                              Positioned.fill(
+                                                child: ClipRRect(
+                                                  borderRadius: BorderRadius.circular(8),
+                                                  child: Image.network(
+                                                    url,
+                                                    fit: BoxFit.cover,
+                                                    errorBuilder: (c, e, st) => Container(
+                                                      color: AppColors.muted(context),
+                                                      child: Icon(
+                                                        Icons.image_not_supported_outlined,
+                                                        color: AppColors.secondaryText(context),
+                                                        size: 20,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                              if (selected)
+                                                Positioned.fill(
+                                                  child: Container(
+                                                    decoration: BoxDecoration(
+                                                      color: AppColors.primaryPurple.withOpacity(0.3),
+                                                      borderRadius: BorderRadius.circular(8),
+                                                      border: Border.all(
+                                                        color: AppColors.primaryPurple,
+                                                        width: 2,
+                                                      ),
+                                                    ),
+                                                    child: const Center(
+                                                      child: Icon(
+                                                        Icons.check_circle,
+                                                        color: Colors.white,
+                                                        size: 20,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        );
+                                      },
+                                    );
+                                  },
+                                ),
+                              ),
+                              if (selectedReferenceUrls.isNotEmpty) ...[
+                                const SizedBox(height: 10),
+                                Text(
+                                  'Selected (${selectedReferenceUrls.length}/4)',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.onBackground(context),
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: selectedReferenceUrls.map((url) {
+                                    return Container(
+                                      width: 50,
+                                      height: 50,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: AppColors.primaryPurple,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: Stack(
+                                        children: [
+                                          Positioned.fill(
+                                            child: ClipRRect(
+                                              borderRadius: BorderRadius.circular(6),
+                                              child: Image.network(
+                                                url,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (c, e, st) => Container(
+                                                  color: AppColors.muted(context),
+                                                  child: Icon(
+                                                    Icons.image,
+                                                    color: AppColors.secondaryText(context),
+                                                    size: 20,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          Positioned(
+                                            top: 2,
+                                            right: 2,
+                                          child: GestureDetector(
+                                            onTap: () {
+                                              setModalState(() {
+                                                selectedReferenceUrls.remove(url);
+                                              });
+                                            },
+                                                child: Container(
+                                                padding: const EdgeInsets.all(1),
+                                                decoration: const BoxDecoration(
+                                                  color: Colors.red,
+                                                  shape: BoxShape.circle,
+                                                ),
+                                                child: const Icon(
+                                                  Icons.close,
+                                                  color: Colors.white,
+                                                  size: 12,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                              ],
+                              const SizedBox(height: 16),
+                              // Info box
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: AppColors.primaryPurple.withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: AppColors.primaryPurple.withOpacity(0.2),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.info_outline, color: AppColors.primaryPurple, size: 18),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        'Next: Paint over the area to edit',
+                                        style: GoogleFonts.inter(
+                                          color: AppColors.onBackground(context),
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w500,
+                                        ),
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
+                              const SizedBox(height: 20),
+                              // Continue button
                               Container(
                                 decoration: BoxDecoration(
-                                  color: AppColors.muted(context).withOpacity(0.2),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: IconButton(
-                          tooltip: 'Close',
-                                  icon: Icon(
-                                    Icons.close_rounded,
-                                    color: AppColors.secondaryText(context),
+                                  gradient: LinearGradient(
+                                    colors: [AppColors.primaryPurple, AppColors.primaryBlue],
                                   ),
-                          onPressed: () => Navigator.of(ctx).pop(),
-                                ),
-                        ),
-                      ],
-                    ),
-                          const SizedBox(height: 32),
-                          // Prompt Section
-                          Text(
-                            'Describe your character',
-                            style: GoogleFonts.inter(
-                              color: AppColors.onBackground(context),
-                              fontWeight: FontWeight.w700,
-                              fontSize: 16,
-                              letterSpacing: 0.15,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                    Container(
-                      decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  AppColors.card(context).withOpacity(0.8),
-                                  AppColors.surface(context).withOpacity(0.6),
-                                ],
-                              ),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: AppColors.primaryPurple.withOpacity(0.15),
-                                width: 1,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.05),
-                                  blurRadius: 10,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ],
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(20),
-                              child: BackdropFilter(
-                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                      child: Padding(
-                                  padding: const EdgeInsets.all(20),
-                        child: TextField(
-                          controller: promptCtrl,
-                                    minLines: 2,
-                                    maxLines: 4,
-                                    textCapitalization: TextCapitalization.sentences,
-                                    decoration: InputDecoration(
-                            border: InputBorder.none,
-                                      hintText: 'A medieval knight in shining armor...\nA cyberpunk warrior with neon implants...\nA fantasy mage with glowing staff...',
-                                      hintStyle: GoogleFonts.inter(
-                                        color: AppColors.mutedText(context),
-                                        fontWeight: FontWeight.w400,
-                                        fontSize: 16,
-                                        height: 1.5,
-                                      ),
+                                  borderRadius: BorderRadius.circular(14),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppColors.primaryPurple.withOpacity(0.3),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
                                     ),
-                                    style: GoogleFonts.inter(
-                                      color: onBg,
-                                      fontWeight: FontWeight.w500,
-                                      fontSize: 16,
-                                      height: 1.5,
-                                    ),
-                          onChanged: (_) => setSheetState(() {}),
-                        ),
-                      ),
-                    ),
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-                          // Reference Images Section
-                    Row(
-                      children: [
-                              Text(
-                                'Reference images',
-                                style: GoogleFonts.inter(
-                                  color: AppColors.onBackground(context),
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 16,
-                                  letterSpacing: 0.15,
+                                  ],
                                 ),
-                              ),
-                        const Spacer(),
-                        if (selectedUrls.isNotEmpty)
-                          Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                                    gradient: AppGradients.primary,
-                                    borderRadius: BorderRadius.circular(20),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: AppColors.primaryPurple.withOpacity(0.3),
-                                        blurRadius: 8,
-                                        offset: const Offset(0, 2),
-                                      ),
-                                    ],
-                                  ),
-                                  child: Text(
-                                    '${selectedUrls.length}/4 selected',
-                                    style: GoogleFonts.inter(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 12,
-                                      letterSpacing: 0.25,
-                                    ),
-                                  ),
-                          ),
-                      ],
-                    ),
-                          const SizedBox(height: 12),
-                          Container(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  AppColors.card(context).withOpacity(0.6),
-                                  AppColors.surface(context).withOpacity(0.4),
-                                ],
-                              ),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: AppColors.primaryPurple.withOpacity(0.1),
-                                width: 1,
-                              ),
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(20),
-                              child: BackdropFilter(
-                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                                child: Padding(
-                                  padding: const EdgeInsets.all(16),
-                                  child: FutureBuilder<List<MediaItem>>(
-                      future: mediaFuture,
-                      builder: (c, snap) {
-                        if (snap.connectionState == ConnectionState.waiting) {
-                          return const Padding(
-                                          padding: EdgeInsets.all(32),
-                            child: Center(child: CircularProgressIndicator()),
-                          );
-                        }
-                        final items = (snap.data ?? <MediaItem>[])
-                            .where((m) => m.mimeType.startsWith('image'))
-                            .toList();
-                        if (items.isEmpty) {
-                          return Padding(
-                                          padding: const EdgeInsets.all(24),
-                                          child: Column(
-                                            children: [
-                                              Icon(
-                                                Icons.image_outlined,
-                                                size: 40,
-                                                color: AppColors.mutedText(context),
-                                              ),
-                                              const SizedBox(height: 12),
-                                              Text(
-                                                'No images in your library yet',
-                                                style: GoogleFonts.inter(
-                                                  color: AppColors.secondaryText(context),
-                                                  fontWeight: FontWeight.w600,
-                                                  fontSize: 14,
-                                                ),
-                                                textAlign: TextAlign.center,
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Text(
-                                                'Upload some images to use as references',
-                                                style: GoogleFonts.inter(
-                                                  color: AppColors.mutedText(context),
-                                                  fontSize: 12,
-                                                ),
-                                                textAlign: TextAlign.center,
-                                              ),
-                                            ],
+                                child: Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    onTap: () {
+                                      if (promptCtrl.text.trim().isEmpty) {
+                                        ScaffoldMessenger.of(ctx).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Please enter a description'),
+                                            behavior: SnackBarBehavior.floating,
                                           ),
                                         );
+                                        return;
                                       }
-                                      final double gridSpacing = 12;
-                                      final int crossAxisCount = 3;
-                                      // Calculate rows needed and set appropriate height
-                                      final int rows = (items.length / crossAxisCount).ceil();
-                                      final double itemHeight = 120;
-                                      final double gridH = (rows * itemHeight + (rows - 1) * gridSpacing).clamp(120.0, 280.0);
-                                      return SizedBox(
-                                        height: gridH,
-                                        child: GridView.builder(
-                            padding: const EdgeInsets.only(bottom: 4),
-                            physics: const BouncingScrollPhysics(),
-                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: crossAxisCount,
-                              crossAxisSpacing: gridSpacing,
-                              mainAxisSpacing: gridSpacing,
-                              childAspectRatio: 1,
-                            ),
-                            itemCount: items.length,
-                            itemBuilder: (c, i) {
-                              final item = items[i];
-                              final String url = item.thumbnailUrl ?? item.url;
-                              final bool selected = selectedUrls.contains(url);
-                              return GestureDetector(
-                                onTap: () {
-                                  if (selected) {
-                                    selectedUrls.remove(url);
-                                                  errorText = null;
-                                  } else {
-                                    // Limit to 4 refs to keep API efficient
-                                    if (selectedUrls.length >= 4) {
-                                                    errorText = 'Maximum 4 reference images allowed';
-                                    } else {
-                                      errorText = null;
-                                      selectedUrls.add(url);
-                                    }
-                                  }
-                                  setSheetState(() {});
-                                },
-                                              child: AnimatedContainer(
-                                                duration: const Duration(milliseconds: 200),
-                                                decoration: BoxDecoration(
-                                                  borderRadius: BorderRadius.circular(16),
-                                                  border: Border.all(
-                                                    color: selected 
-                                                      ? AppColors.primaryPurple 
-                                                      : AppColors.muted(context).withOpacity(0.3),
-                                                    width: selected ? 3 : 1,
-                                                  ),
-                                                  boxShadow: [
-                                                    if (selected) ...[
-                                                      BoxShadow(
-                                                        color: AppColors.primaryPurple.withOpacity(0.3),
-                                                        blurRadius: 12,
-                                                        offset: const Offset(0, 6),
-                                                      ),
-                                                    ] else ...[
-                                                      BoxShadow(
-                                                        color: Colors.black.withOpacity(0.05),
-                                                        blurRadius: 6,
-                                                        offset: const Offset(0, 3),
-                                                      ),
-                                                    ],
-                                                  ],
-                                                ),
-                                                child: ClipRRect(
-                                                  borderRadius: BorderRadius.circular(15),
-                                child: Stack(
-                                  children: [
-                                    Positioned.fill(
-                                        child: Image.network(
-                                          url,
-                                          fit: BoxFit.cover,
-                                          errorBuilder: (c, e, st) => Container(
-                                            color: AppColors.muted(context),
-                                                            child: Icon(
-                                                              Icons.image_not_supported_outlined, 
-                                                              color: AppColors.secondaryText(context),
+                                      if (selectedReferenceUrls.isEmpty) {
+                                        ScaffoldMessenger.of(ctx).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Please select at least 1 reference'),
+                                            behavior: SnackBarBehavior.floating,
                                           ),
-                                        ),
+                                        );
+                                        return;
+                                      }
+                                      Navigator.of(ctx).pop(true);
+                                    },
+                                    borderRadius: BorderRadius.circular(14),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 16),
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          const Icon(Icons.brush, color: Colors.white, size: 20),
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            'Next: Paint Mask',
+                                            style: GoogleFonts.inter(
+                                              color: Colors.white,
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
-                                                      if (selected) ...[
-                                    Positioned.fill(
-                                                          child: Container(
-                                        decoration: BoxDecoration(
-                                                              gradient: LinearGradient(
-                                                                begin: Alignment.topLeft,
-                                                                end: Alignment.bottomRight,
-                                                                colors: [
-                                                                  AppColors.primaryPurple.withOpacity(0.2),
-                                                                  AppColors.primaryBlue.withOpacity(0.1),
-                                                                ],
-                                        ),
-                                      ),
-                                    ),
-                                                        ),
-                                      Positioned(
-                                                          right: 8,
-                                                          top: 8,
-                                        child: Container(
-                                                            padding: const EdgeInsets.all(6),
-                                          decoration: BoxDecoration(
-                                                              gradient: AppGradients.primary,
-                                                              shape: BoxShape.circle,
-                                            boxShadow: [
-                                                                BoxShadow(
-                                                                  color: AppColors.primaryPurple.withOpacity(0.4),
-                                                                  blurRadius: 8,
-                                                                  offset: const Offset(0, 2),
-                                                                ),
-                                                              ],
-                                                            ),
-                                                            child: const Icon(
-                                                              Icons.check_rounded, 
-                                                              color: Colors.white, 
-                                                              size: 14,
-                                                            ),
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ],
-                                                  ),
-                                                ),
-                                ),
-                              );
-                            },
-                          ),
-                        );
-                      },
-                    ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (errorText != null) ...[
-                            const SizedBox(height: 12),
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: Colors.redAccent.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: Colors.redAccent.withOpacity(0.2),
-                                  width: 1,
-                                ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.error_outline_rounded,
-                                    color: Colors.redAccent,
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      errorText!,
-                                      style: GoogleFonts.inter(
-                                        color: Colors.redAccent,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 32),
-                          // Action Button
-                          Container(
-                            decoration: BoxDecoration(
-                              gradient: canStart() 
-                                ? LinearGradient(
-                                    colors: [
-                                      AppColors.accentPurple,
-                                      AppColors.primaryPurple,
-                                    ],
-                                  )
-                                : LinearGradient(
-                                    colors: [
-                                      AppColors.muted(context).withOpacity(0.3),
-                                      AppColors.muted(context).withOpacity(0.2),
-                                    ],
-                                  ),
-                              borderRadius: BorderRadius.circular(16),
-                              boxShadow: [
-                                if (canStart()) ...[
-                                  BoxShadow(
-                                    color: AppColors.accentPurple.withOpacity(0.4),
-                                    blurRadius: 16,
-                                    offset: const Offset(0, 8),
-                                  ),
-                                ],
-                              ],
-                            ),
-                            child: ElevatedButton.icon(
-                      onPressed: canStart()
-                          ? () {
-                              Navigator.of(ctx).pop(_CharacterRemixInput(
-                                prompt: promptCtrl.text.trim(),
-                                referenceUrls: selectedUrls.toList(growable: false),
-                              ));
-                            }
-                          : null,
-                              icon: Icon(
-                                Icons.person_pin_rounded,
-                                color: canStart() ? Colors.white : AppColors.mutedText(context),
-                              ),
-                              label: Text(
-                                'Start Character Remix',
-                                style: GoogleFonts.inter(
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 16,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.transparent,
-                                foregroundColor: canStart() ? Colors.white : AppColors.mutedText(context),
-                                shadowColor: Colors.transparent,
-                                padding: const EdgeInsets.symmetric(vertical: 18),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                              // Footer
-                              Center(
-                                child: Text(
-                                  'Powered by Ideogram V3 Character Remix',
-                                  style: GoogleFonts.inter(
-                                    color: AppColors.mutedText(context),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
                                   ),
                                 ),
                               ),
@@ -4450,17 +4509,61 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                           ),
                         ),
                       ),
-                    );
-                  },
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
 
-    return result;
+    if (continueWithMask != true || !mounted) return null;
+
+    // Step 2: Show brush painter
+    final Uint8List? paintedMask = await Navigator.of(context).push<Uint8List>(
+      MaterialPageRoute(
+        builder: (ctx) => MaskBrushPainter(
+          imageBytes: _imageBytes!,
+          onMaskComplete: (mask) => Navigator.of(ctx).pop(mask),
+          onCancel: () => Navigator.of(ctx).pop(),
+        ),
+      ),
+    );
+
+    if (paintedMask == null || !mounted) return null;
+
+    // Upload mask to get URL
+    try {
+      setState(() { _saving = true; });
+      final uploaded = await _mediaRepo.uploadBytes(
+        bytes: paintedMask,
+        filename: 'mask_${DateTime.now().millisecondsSinceEpoch}.png',
+        contentType: 'image/png',
+        thumbnailBytes: paintedMask,
+        metadata: {'type': 'mask', 'tool': 'character_edit'},
+      );
+      
+      setState(() { _saving = false; });
+      
+      return _CharacterEditInput(
+        prompt: promptCtrl.text.trim(),
+        maskUrl: uploaded.url,
+        referenceUrls: selectedReferenceUrls.toList(),
+      );
+    } catch (e) {
+      setState(() { _saving = false; });
+      Logger.error('Failed to upload mask', context: {'error': e.toString()});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to upload mask: $e'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return null;
+    }
   }
 
   // Elements bottom sheet: prompt + pick single reference or upload from gallery
@@ -5080,10 +5183,12 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
 
 }
 
-class _CharacterRemixInput {
+
+class _CharacterEditInput {
   final String prompt;
+  final String maskUrl;
   final List<String> referenceUrls;
-  const _CharacterRemixInput({required this.prompt, required this.referenceUrls});
+  const _CharacterEditInput({required this.prompt, required this.maskUrl, required this.referenceUrls});
 }
 
 class _ElementsInput {

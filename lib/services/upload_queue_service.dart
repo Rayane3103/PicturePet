@@ -75,8 +75,16 @@ class UploadQueueService {
   final StreamController<Map<String, dynamic>> _events = StreamController.broadcast();
   Stream<Map<String, dynamic>> get events => _events.stream;
 
-  void enqueue(UploadTask task) {
+  /// Emit a custom event to the events stream
+  void emitEvent(Map<String, dynamic> event) {
+    _events.add(event);
+  }
+
+  void enqueue(UploadTask task, {bool emitPreparing = false}) {
     _queue.add(task);
+    if (emitPreparing) {
+      _events.add({'type': 'preparing', 'filename': task.filename});
+    }
     _persistQueue();
     _process();
   }

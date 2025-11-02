@@ -436,6 +436,196 @@ async function runFalIdeogramCharacterRemix(
   throw new Error('fal ideogram character remix response missing image')
 }
 
+// Ideogram Character Edit: Edit characters using mask-based selection
+async function runFalIdeogramCharacterEdit(
+  inputUrl: string,
+  maskUrl: string,
+  prompt: string,
+  referenceUrls: string[]
+): Promise<Uint8Array> {
+  const apiKey = Deno.env.get('FAL_API_KEY')
+  if (!apiKey) throw new Error('Missing FAL_API_KEY')
+
+  // This endpoint uses queue.fal.run, which requires polling
+  const submitUrl = 'https://queue.fal.run/fal-ai/ideogram/character/edit'
+  const refs = Array.isArray(referenceUrls) ? referenceUrls.filter((u) => typeof u === 'string' && u.length > 0) : []
+
+  // Step 1: Submit the job
+  const body = {
+    prompt,
+    image_url: inputUrl,
+    mask_url: maskUrl,
+    reference_image_urls: refs,
+  }
+
+  console.log('ideogram_character_edit_submitting', { 
+    prompt_length: prompt.length, 
+    ref_count: refs.length,
+    has_mask: !!maskUrl,
+    has_image: !!inputUrl,
+    mask_url_prefix: maskUrl.substring(0, 50),
+    image_url_prefix: inputUrl.substring(0, 50),
+    ref_urls_prefixes: refs.map(r => r.substring(0, 50))
+  })
+
+  const submitResp = await fetch(submitUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Key ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  })
+  
+  if (!submitResp.ok) {
+    let details = ''
+    try { details = await submitResp.text() } catch (_) {}
+    console.error('ideogram_character_edit_submit_error', { 
+      status: submitResp.status, 
+      details,
+      prompt_length: prompt.length,
+      ref_count: refs.length
+    })
+    throw new Error(`fal.run submit HTTP ${submitResp.status}${details ? `: ${details}` : ''}`)
+  }
+
+  const submitJson = await submitResp.json()
+  console.log('ideogram_character_edit_submitted', { response: submitJson })
+  
+  // The response should contain status_url or request_id
+  const statusUrl = submitJson.status_url || submitJson.statusUrl
+  const requestId = submitJson.request_id || submitJson.requestId
+  
+  if (!statusUrl && !requestId) {
+    console.error('ideogram_character_edit_no_status_url', { response: submitJson })
+    throw new Error('No status_url or request_id in queue response')
+  }
+
+  // Step 2: Poll for status and result
+  // Use provided status URL or construct it
+  const finalStatusUrl = statusUrl || `https://queue.fal.run/fal-ai/ideogram/character/edit/requests/${requestId}/status`
+  console.log('ideogram_character_edit_polling', { status_url: finalStatusUrl, request_id: requestId })
+  let attempts = 0
+  const maxAttempts = 120 // 10 minutes max with varied intervals
+  let consecutiveErrors = 0
+  const maxConsecutiveErrors = 5
+
+  while (attempts < maxAttempts) {
+    // Dynamic delay: shorter at first, longer later
+    const delay = attempts < 6 ? 2000 : attempts < 20 ? 3000 : 5000
+    if (attempts > 0) await new Promise(resolve => setTimeout(resolve, delay))
+    attempts++
+
+    try {
+      const statusResp = await fetch(finalStatusUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Key ${apiKey}`,
+        },
+      })
+
+      if (!statusResp.ok) {
+        consecutiveErrors++
+        const errorText = await statusResp.text().catch(() => 'Unable to read error')
+        console.error('ideogram_character_edit_status_error', { 
+          attempt: attempts, 
+          status: statusResp.status,
+          error: errorText,
+          consecutive_errors: consecutiveErrors
+        })
+        
+        // If we get too many consecutive errors, give up
+        if (consecutiveErrors >= maxConsecutiveErrors) {
+          throw new Error(`Failed to check status after ${consecutiveErrors} consecutive errors: HTTP ${statusResp.status}`)
+        }
+        continue // Retry on error
+      }
+
+      // Reset consecutive error count on successful response
+      consecutiveErrors = 0
+
+      const statusJson = await statusResp.json()
+      console.log('ideogram_character_edit_status', { 
+        attempt: attempts, 
+        status: statusJson.status,
+        request_id: requestId
+      })
+      
+      if (statusJson.status === 'COMPLETED') {
+        // Get the result - try response_url first
+        if (statusJson?.response_url) {
+          console.log('ideogram_character_edit_fetching_result', { response_url: statusJson.response_url })
+          const resultResp = await fetch(statusJson.response_url, {
+            headers: {
+              Authorization: `Key ${apiKey}`,
+            },
+          })
+          
+          if (!resultResp.ok) {
+            throw new Error(`Failed to fetch result: HTTP ${resultResp.status}`)
+          }
+          
+          const resultJson = await resultResp.json()
+          console.log('ideogram_character_edit_result', { has_images: !!resultJson?.images })
+          
+          if (resultJson?.images?.[0]?.url) {
+            const img = await fetch(resultJson.images[0].url)
+            if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+            const buf = await img.arrayBuffer()
+            console.log('ideogram_character_edit_success', { image_size: buf.byteLength })
+            return new Uint8Array(buf)
+          }
+        }
+        
+        // Alternative: result might be in statusJson directly
+        if (statusJson?.images?.[0]?.url) {
+          const img = await fetch(statusJson.images[0].url)
+          if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+          const buf = await img.arrayBuffer()
+          console.log('ideogram_character_edit_success_direct', { image_size: buf.byteLength })
+          return new Uint8Array(buf)
+        }
+        
+        // Check if result is in data field
+        if (statusJson?.data?.images?.[0]?.url) {
+          const img = await fetch(statusJson.data.images[0].url)
+          if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+          const buf = await img.arrayBuffer()
+          console.log('ideogram_character_edit_success_data', { image_size: buf.byteLength })
+          return new Uint8Array(buf)
+        }
+        
+        console.error('ideogram_character_edit_completed_no_image', { response: JSON.stringify(statusJson) })
+        throw new Error('Completed but no image URL found in response')
+      } else if (statusJson.status === 'FAILED') {
+        const errorMsg = statusJson.error || statusJson.logs || JSON.stringify(statusJson)
+        console.error('ideogram_character_edit_failed', { error: errorMsg })
+        throw new Error(`Job failed: ${errorMsg}`)
+      }
+      // Otherwise status is IN_QUEUE or IN_PROGRESS, continue polling
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('Job failed') || error.message.includes('Completed but no image') || error.message.includes('consecutive errors'))) {
+        throw error // Don't retry on actual failures
+      }
+      consecutiveErrors++
+      console.error('ideogram_character_edit_poll_error', { 
+        attempt: attempts, 
+        error: error instanceof Error ? error.message : String(error),
+        consecutive_errors: consecutiveErrors
+      })
+      
+      // Give up if we hit too many consecutive errors
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        throw new Error(`Polling failed after ${consecutiveErrors} consecutive errors: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      // Continue polling on network/parse errors
+    }
+  }
+
+  throw new Error(`Timeout: Character edit job did not complete after ${attempts} polling attempts (~10 minutes)`)
+}
+
 async function uploadToStorage(userId: string, bytes: Uint8Array): Promise<{ url: string; path: string }> {
   const path = `u/${userId}/${Date.now()}/ai-output.jpg`
   const { error } = await supabase.storage.from('media').upload(path, bytes, {
@@ -524,6 +714,20 @@ async function processJob(job: AiJobRow): Promise<void> {
           throw new Error('elements requires prompt and a reference_url')
         }
         outputBytes = await runFalElementsRemix(inputUrl, prompt, referenceUrl)
+        break
+      }
+      case 'ideogram_character_edit': {
+        const payload = job.payload as Record<string, unknown>
+        const inputUrl = job.input_image_url as string
+        const prompt = (payload['prompt'] as string) ?? ''
+        const maskUrl = (payload['mask_url'] as string) ?? ''
+        const refs = Array.isArray(payload['reference_urls'])
+          ? (payload['reference_urls'] as unknown[]).filter((u) => typeof u === 'string') as string[]
+          : []
+        if (!prompt || !maskUrl || refs.length === 0) {
+          throw new Error('ideogram_character_edit requires prompt, mask_url, and at least one reference_url')
+        }
+        outputBytes = await runFalIdeogramCharacterEdit(inputUrl, maskUrl, prompt, refs)
         break
       }
       default:
