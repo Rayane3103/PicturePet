@@ -446,7 +446,7 @@ class _MaskPainter extends CustomPainter {
           p1,
           p2,
           Paint()
-            ..color = Colors.red.withOpacity(0.5)
+            ..color = Colors.white.withOpacity(0.1)
             ..strokeWidth = points[i].paint!.strokeWidth
             ..strokeCap = StrokeCap.round,
         );

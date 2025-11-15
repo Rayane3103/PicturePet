@@ -832,7 +832,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                         const SizedBox(width: 8),
                         _aiChip(Icons.high_quality_rounded, 'Upscale', _onUpscale),
                         const SizedBox(width: 8),
-                        _aiChip(Icons.brush_rounded, 'Mask Edit', _onCharacterBrushEdit),
+                        _aiChip(Icons.person_rounded, 'Character', _onCharacterBrushEdit),
                         const SizedBox(width: 8),
                         _aiChip(Icons.text_fields_rounded, 'Text Edit', _onCalligrapher),
                         
@@ -4048,7 +4048,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                                     ),
                                     shape: BoxShape.circle,
                                   ),
-                                  child: const Icon(Icons.brush, color: Colors.white, size: 20),
+                                  child: const Icon(Icons.person_rounded, color: Colors.white, size: 20),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
@@ -4489,7 +4489,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                                       child: Row(
                                         mainAxisAlignment: MainAxisAlignment.center,
                                         children: [
-                                          const Icon(Icons.brush, color: Colors.white, size: 20),
+                                          const Icon(Icons.person_rounded, color: Colors.white, size: 20),
                                           const SizedBox(width: 10),
                                           Text(
                                             'Next: Paint Mask',

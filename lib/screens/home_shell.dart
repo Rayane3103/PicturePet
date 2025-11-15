@@ -1,17 +1,23 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+
+import 'dart:typed_data';
+import 'dart:convert';
+import '../services/media_pipeline_service.dart';
+import '../services/upload_queue_service.dart';
+import '../services/ai_jobs_service.dart';
+import '../repositories/projects_repository.dart';
+import '../repositories/ai_jobs_repository.dart';
+import '../repositories/media_repository.dart';
+import '../utils/logger.dart';
+import '../theme/app_theme.dart';
+import '../widgets/app_drawer.dart';
+import 'editor_page.dart';
 import 'library_page.dart';
 import 'profile_page.dart';
-import 'editor_page.dart';
-import '../widgets/app_drawer.dart';
-import 'dart:ui';
-import '../theme/app_theme.dart';
-import 'package:google_fonts/google_fonts.dart';
-import '../services/media_pipeline_service.dart';
-// Removed unused import
-import 'dart:async';
-import '../services/upload_queue_service.dart';
-import '../services/fal_ai_service.dart';
-import '../utils/image_compress.dart';
 
 class HomeShell extends StatefulWidget {
   final ThemeMode themeMode;
@@ -26,9 +32,18 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
   final MediaPipelineService _pipeline = MediaPipelineService();
+  final ProjectsRepository _projectsRepo = ProjectsRepository();
+  final AiJobsRepository _aiJobsRepo = AiJobsRepository();
+  final MediaRepository _mediaRepo = MediaRepository();
   StreamSubscription<Map<String, dynamic>>? _uploadSub;
-  final FalAiService _fal = FalAiService();
   bool _aiGenerating = false;
+  
+  // 1x1 transparent PNG as placeholder
+  Uint8List _getPlaceholderImage() {
+    // Base64 encoded 1x1 transparent PNG
+    const String base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    return base64Decode(base64);
+  }
 
   void _openAddSheet() {
     showModalBottomSheet(
@@ -250,40 +265,73 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _generateWithAi(String prompt) async {
     if (_aiGenerating) return;
     setState(() => _aiGenerating = true);
-    final filename = 'imagen4_${DateTime.now().millisecondsSinceEpoch}.jpg';
     
-    // Immediately emit a "preparing" event so the library shows a loading card
-    UploadQueueService.instance.emitEvent({'type': 'preparing', 'filename': filename});
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Generating image with AI...'),
-        duration: Duration(seconds: 2), // Shorter duration since we have the card now
-      ),
-    );
+    final projectName = _deriveProjectNameFromPrompt(prompt);
+
     try {
-      final bytes = await _fal.imagen4Generate(prompt: prompt);
-      final compressed = await compressImage(bytes, quality: 90);
-      final thumb = await generateThumbnail(compressed, size: 384, quality: 75);
-      final projectName = _deriveProjectNameFromPrompt(prompt);
-      UploadQueueService.instance.enqueue(UploadTask(
-        bytes: compressed,
-        filename: filename,
-        contentType: 'image/jpeg',
-        thumbnailBytes: thumb,
-        thumbnailContentType: 'image/jpeg',
+      // Upload placeholder image (1x1 transparent PNG) to satisfy NOT NULL constraint
+      // The Edge Function will replace it with the actual generated image
+      final placeholderBytes = _getPlaceholderImage();
+      final placeholderMedia = await _mediaRepo.uploadBytes(
+        bytes: placeholderBytes,
+        filename: 'placeholder.png',
+        contentType: 'image/png',
+        thumbnailBytes: placeholderBytes,
         metadata: {
-          'source': 'ai_imagen4',
-          'prompt': prompt,
+          'source': 'placeholder',
+          'for': 'ai_generation_pending',
         },
-        projectName: projectName,
-      ));
+      );
+
+      // Create project with placeholder image URL (will be replaced when job completes)
+      final project = await _projectsRepo.create(
+        name: projectName,
+        originalImageUrl: placeholderMedia.url,
+        thumbnailUrl: placeholderMedia.thumbnailUrl ?? placeholderMedia.url,
+        fileSizeBytes: placeholderBytes.length,
+      );
+
+      // Create AI job with imagen4 tool
+      final job = await _aiJobsRepo.enqueueJob(
+        projectId: project.id,
+        toolName: 'imagen4',
+        payload: {
+          'prompt': prompt,
+          'source': 'ai_imagen4',
+          'placeholder_url': placeholderMedia.url, // Store for potential cleanup
+        },
+        inputImageUrl: null, // imagen4 is text-to-image, no input image
+      );
+
+      // Trigger processing on Edge Function
+      await AiJobsService.instance.triggerProcessing(job.id);
+
+      if (!mounted) return;
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI generation started'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ),
+      );
     } catch (e) {
-      // Remove the preparing status on failure
-      UploadQueueService.instance.emitEvent({'type': 'failed', 'filename': filename, 'error': e.toString()});
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('AI generation failed: $e')));
+      Logger.error('Failed to start AI generation', context: {
+        'error': e.toString(),
+        'prompt': prompt,
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('AI generation failed: $e'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     } finally {
-      if (mounted) setState(() => _aiGenerating = false);
+      if (mounted) {
+        setState(() => _aiGenerating = false);
+      }
     }
   }
 
@@ -299,6 +347,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    // Listen to upload queue for non-AI uploads (gallery/camera)
     _uploadSub = UploadQueueService.instance.events.listen((event) {
       if (event['type'] == 'completed' && mounted) {
         final projectId = event['project_id'] as String?;
@@ -309,6 +358,7 @@ class _HomeShellState extends State<HomeShell> {
         }
       }
     });
+    // Note: AI job completions are handled by LibraryPage which subscribes to user jobs
   }
 
   @override

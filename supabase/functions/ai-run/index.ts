@@ -89,6 +89,58 @@ async function runFalNanoBananaEdit(inputUrl: string, prompt: string): Promise<U
   throw new Error('fal response missing image')
 }
 
+// Imagen4: text-to-image generation (no input image required)
+async function runFalImagen4Generate(prompt: string): Promise<Uint8Array> {
+  const apiKey = Deno.env.get('FAL_API_KEY')
+  if (!apiKey) throw new Error('Missing FAL_API_KEY')
+
+  const url = 'https://fal.run/fal-ai/imagen4/preview'
+  // Provide prompt at root and inside input for broader compatibility
+  const body = {
+    prompt,
+    input: { prompt },
+  }
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Key ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!resp.ok) {
+    let details = ''
+    try { details = await resp.text() } catch (_) {}
+    console.error('imagen4_error', { status: resp.status, details })
+    throw new Error(`fal.run HTTP ${resp.status}${details ? `: ${details}` : ''}`)
+  }
+
+  const json = await resp.json()
+  
+  // Try images array first
+  if (json?.images?.[0]?.url) {
+    const img = await fetch(json.images[0].url)
+    if (!img.ok) throw new Error(`image fetch HTTP ${img.status}`)
+    const buf = await img.arrayBuffer()
+    return new Uint8Array(buf)
+  }
+  
+  // Fallback: check for image as data URL
+  if (typeof json.image === 'string' && json.image.startsWith('data:')) {
+    const idx = json.image.indexOf(',')
+    const b64data = json.image.slice(idx + 1)
+    const binary = atob(b64data)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+  
+  throw new Error('fal imagen4 response missing image')
+}
+
 async function runFalStyleTransfer(inputUrl: string, stylePrompt: string): Promise<Uint8Array> {
   const apiKey = Deno.env.get('FAL_API_KEY')
   if (!apiKey) throw new Error('Missing FAL_API_KEY')
@@ -730,6 +782,16 @@ async function processJob(job: AiJobRow): Promise<void> {
         outputBytes = await runFalIdeogramCharacterEdit(inputUrl, maskUrl, prompt, refs)
         break
       }
+      case 'imagen4': {
+        // Text-to-image generation - no input image required
+        const payload = job.payload as Record<string, unknown>
+        const prompt = (payload['prompt'] as string) ?? ''
+        if (!prompt) {
+          throw new Error('imagen4 requires a prompt')
+        }
+        outputBytes = await runFalImagen4Generate(prompt)
+        break
+      }
       default:
         throw new Error(`Unknown tool ${job.tool_name}`)
     }
@@ -744,15 +806,25 @@ async function processJob(job: AiJobRow): Promise<void> {
 
     // Touch project output and history
     // 1) update project
+    // For imagen4 (text-to-image), also set original_image_url since this is the first image
+    const projectUpdate: Record<string, string> = {
+      output_image_url: uploaded.url,
+      thumbnail_url: uploaded.url,
+    }
+    if (job.tool_name === 'imagen4') {
+      projectUpdate.original_image_url = uploaded.url
+    }
     await supabase
       .from('projects')
-      .update({ output_image_url: uploaded.url, thumbnail_url: uploaded.url })
+      .update(projectUpdate)
       .eq('id', job.project_id)
 
     // 2) insert project_edits history
+    // For imagen4 (text-to-image), use a more descriptive edit name
+    const editName = job.tool_name === 'imagen4' ? 'AI Generation (Imagen4)' : job.tool_name
     await supabase.from('project_edits').insert({
       project_id: job.project_id,
-      edit_name: job.tool_name,
+      edit_name: editName,
       parameters: job.payload,
       input_image_url: job.input_image_url,
       output_image_url: uploaded.url,

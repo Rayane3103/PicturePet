@@ -2,38 +2,95 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:io';
 import 'dart:convert';
+
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../repositories/media_repository.dart';
+import '../utils/image_compress.dart';
 import '../utils/logger.dart';
+import 'fal_ai_service.dart';
+
+enum UploadTaskType { upload, aiGenerate }
+
+UploadTaskType _taskTypeFromString(String? raw) {
+  switch (raw) {
+    case 'aiGenerate':
+      return UploadTaskType.aiGenerate;
+    case 'upload':
+    default:
+      return UploadTaskType.upload;
+  }
+}
 
 class UploadTask {
-  final Uint8List bytes;
+  UploadTask({
+    required Uint8List bytes,
+    required this.filename,
+    required this.contentType,
+    Uint8List? thumbnailBytes,
+    this.thumbnailContentType = 'image/jpeg',
+    Map<String, dynamic>? metadata,
+    String? sourcePath,
+    this.projectName,
+    this.type = UploadTaskType.upload,
+    this.aiPrompt,
+    Map<String, dynamic>? aiOptions,
+  })  : bytes = bytes,
+        thumbnailBytes = thumbnailBytes,
+        sourcePath = sourcePath,
+        metadata = metadata != null ? Map<String, dynamic>.from(metadata) : <String, dynamic>{},
+        aiOptions = aiOptions != null ? Map<String, dynamic>.from(aiOptions) : <String, dynamic>{};
+
+  Uint8List bytes;
   final String filename;
   final String contentType;
-  final Uint8List? thumbnailBytes;
+  Uint8List? thumbnailBytes;
   final String thumbnailContentType;
   final Map<String, dynamic> metadata;
-  final String? sourcePath;
+  String? sourcePath;
   final String? projectName;
+  final UploadTaskType type;
+  final String? aiPrompt;
+  final Map<String, dynamic> aiOptions;
 
   int uploadedBytes = 0;
   bool cancelled = false;
   Completer<void>? _completer;
 
-  UploadTask({
-    required this.bytes,
-    required this.filename,
-    required this.contentType,
-    this.thumbnailBytes,
-    this.thumbnailContentType = 'image/jpeg',
-    this.metadata = const {},
-    this.sourcePath,
-    this.projectName,
-  });
-
   Future<void> cancel() async {
     cancelled = true;
     _completer?.completeError(StateError('cancelled'));
+  }
+
+  UploadTask copyWith({
+    Uint8List? bytes,
+    Uint8List? thumbnailBytes,
+    String? sourcePath,
+    Map<String, dynamic>? metadata,
+    UploadTaskType? type,
+    String? aiPrompt,
+    Map<String, dynamic>? aiOptions,
+  }) {
+    final updated = UploadTask(
+      bytes: bytes ?? this.bytes,
+      filename: filename,
+      contentType: contentType,
+      thumbnailBytes: thumbnailBytes ?? this.thumbnailBytes,
+      thumbnailContentType: thumbnailContentType,
+      metadata: metadata ?? this.metadata,
+      sourcePath: sourcePath ?? this.sourcePath,
+      projectName: projectName,
+      type: type ?? this.type,
+      aiPrompt: aiPrompt ?? this.aiPrompt,
+      aiOptions: aiOptions ?? this.aiOptions,
+    )
+      ..uploadedBytes = uploadedBytes
+      ..cancelled = cancelled;
+    if (_completer != null) {
+      updated._completer = _completer;
+    }
+    return updated;
   }
 
   Map<String, dynamic> toJson() => {
@@ -43,30 +100,44 @@ class UploadTask {
         'metadata': metadata,
         'sourcePath': sourcePath,
         'projectName': projectName,
+        'type': type.name,
+        'aiPrompt': aiPrompt,
+        if (aiOptions.isNotEmpty) 'aiOptions': aiOptions,
       };
 
   static UploadTask fromJson(Map<String, dynamic> json) {
     return UploadTask(
       bytes: Uint8List(0),
       filename: json['filename'] as String,
-      contentType: json['contentType'] as String,
+      contentType: (json['contentType'] as String?) ?? 'image/jpeg',
       thumbnailBytes: null,
       thumbnailContentType: (json['thumbnailContentType'] as String?) ?? 'image/jpeg',
       metadata: Map<String, dynamic>.from(json['metadata'] as Map? ?? {}),
       sourcePath: json['sourcePath'] as String?,
       projectName: json['projectName'] as String?,
+      type: _taskTypeFromString(json['type'] as String?),
+      aiPrompt: json['aiPrompt'] as String?,
+      aiOptions: Map<String, dynamic>.from(json['aiOptions'] as Map? ?? {}),
     );
   }
 }
 
 class UploadQueueService {
-  UploadQueueService._internal({MediaRepository? repo}) : _repo = repo ?? MediaRepository();
+  UploadQueueService._internal({MediaRepository? repo, FalAiService? fal})
+      : _repo = repo ?? MediaRepository(),
+        _fal = fal ?? FalAiService();
+
   static final UploadQueueService instance = UploadQueueService._internal();
-  factory UploadQueueService({MediaRepository? repo}) {
-    if (repo != null) return UploadQueueService._internal(repo: repo);
+
+  factory UploadQueueService({MediaRepository? repo, FalAiService? fal}) {
+    if (repo != null || fal != null) {
+      return UploadQueueService._internal(repo: repo, fal: fal);
+    }
     return instance;
   }
+
   final MediaRepository _repo;
+  final FalAiService _fal;
 
   final List<UploadTask> _queue = [];
   bool _isProcessing = false;
@@ -80,13 +151,42 @@ class UploadQueueService {
     _events.add(event);
   }
 
-  void enqueue(UploadTask task, {bool emitPreparing = false}) {
+  void enqueue(UploadTask task, {bool emitPreparing = false, String? stage}) {
     _queue.add(task);
     if (emitPreparing) {
-      _events.add({'type': 'preparing', 'filename': task.filename});
+      _events.add({
+        'type': 'preparing',
+        'filename': task.filename,
+        'stage': stage ?? (task.type == UploadTaskType.aiGenerate ? 'generating' : 'uploading'),
+        if (task.aiPrompt != null) 'prompt': task.aiPrompt,
+      });
     }
-    _persistQueue();
+    unawaited(_persistQueue());
     _process();
+  }
+
+  void enqueueAiGeneration({
+    required String prompt,
+    required String filename,
+    String contentType = 'image/jpeg',
+    String? projectName,
+    Map<String, dynamic> metadata = const {},
+  }) {
+    final mergedMetadata = <String, dynamic>{...metadata, 'prompt': prompt};
+    enqueue(
+      UploadTask(
+        bytes: Uint8List(0),
+        filename: filename,
+        contentType: contentType,
+        thumbnailBytes: null,
+        metadata: mergedMetadata,
+        projectName: projectName,
+        type: UploadTaskType.aiGenerate,
+        aiPrompt: prompt,
+      ),
+      emitPreparing: true,
+      stage: 'generating',
+    );
   }
 
   /// Re-enqueue a failed upload by filename, if there was a matching task persisted.
@@ -122,6 +222,17 @@ class UploadQueueService {
       } catch (_) {}
     }
     if (_queue.isNotEmpty) {
+      for (final task in _queue) {
+        final restoredStage = task.type == UploadTaskType.aiGenerate
+            ? (task.sourcePath != null ? 'uploading' : 'generating')
+            : 'uploading';
+        _events.add({
+          'type': 'preparing',
+          'filename': task.filename,
+          'stage': restoredStage,
+          if (task.aiPrompt != null) 'prompt': task.aiPrompt,
+        });
+      }
       _process();
     }
   }
@@ -142,34 +253,105 @@ class UploadQueueService {
     if (_isProcessing) return;
     _isProcessing = true;
     while (_queue.isNotEmpty) {
-      final task = _queue.removeAt(0);
+      var task = _queue.first;
+      if (task.cancelled) {
+        _queue.removeAt(0);
+        await _persistQueue();
+        continue;
+      }
+      Uint8List bytes = task.bytes;
+      Uint8List? thumbnailBytes = task.thumbnailBytes;
+      String? sourcePath = task.sourcePath;
+      bool createdTempFile = false;
       try {
-        _events.add({'type': 'started', 'filename': task.filename});
-        if (task.cancelled) throw StateError('cancelled');
-        Uint8List bytes = task.bytes;
-        if (bytes.isEmpty && task.sourcePath != null) {
-          bytes = await File(task.sourcePath!).readAsBytes();
+        final initialStage = task.type == UploadTaskType.aiGenerate ? 'generating' : 'uploading';
+        _events.add({'type': 'started', 'filename': task.filename, 'stage': initialStage});
+
+        if (task.type == UploadTaskType.aiGenerate) {
+          final prompt = task.aiPrompt ?? (task.metadata['prompt'] as String?);
+          if (prompt == null || prompt.trim().isEmpty) {
+            throw Exception('AI prompt missing for ${task.filename}');
+          }
+          double genProgress = 0.05;
+          _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'generating', 'progress': genProgress});
+          Timer? genTicker;
+          bool generationCompleted = false;
+          try {
+            genTicker = Timer.periodic(const Duration(milliseconds: 400), (timer) {
+              if (generationCompleted) {
+                timer.cancel();
+                return;
+              }
+              final remaining = 0.65 - genProgress;
+              final step = (remaining * 0.2).clamp(0.01, 0.06);
+              genProgress = (genProgress + step).clamp(0.05, 0.65);
+              _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'generating', 'progress': genProgress});
+            });
+          } catch (_) {}
+
+          final rawBytes = await _fal.imagen4Generate(prompt: prompt);
+          Uint8List processed = rawBytes;
+          try {
+            processed = await compressImage(rawBytes, quality: 90);
+          } catch (_) {}
+          Uint8List? thumb;
+          try {
+            thumb = await generateThumbnail(processed, size: 384, quality: 75);
+          } catch (_) {}
+
+          final tempPath = await _writeTempFile(processed, task.filename);
+          createdTempFile = true;
+          bytes = processed;
+          thumbnailBytes = thumb ?? processed;
+          sourcePath = tempPath;
+
+          task = task.copyWith(
+            bytes: bytes,
+            thumbnailBytes: thumbnailBytes,
+            sourcePath: sourcePath,
+          );
+          _queue[0] = task;
+          await _persistQueue();
+
+          generationCompleted = true;
+          try {
+            genTicker?.cancel();
+          } catch (_) {}
+          _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'processing', 'progress': 0.7});
         }
-        // Before uploading, ensure we have connectivity
+
         await _ensureOnline();
 
-        // Emit initial progress
-        _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'uploading', 'progress': 0.01});
+        if (bytes.isEmpty && sourcePath != null) {
+          bytes = await File(sourcePath).readAsBytes();
+        }
 
-        // Simulated smooth progress while awaiting network I/O
-        double simulatedProgress = 0.01;
+        double simulatedProgress = task.type == UploadTaskType.aiGenerate ? 0.72 : 0.05;
+        _events.add({
+          'type': 'progress',
+          'filename': task.filename,
+          'stage': 'uploading',
+          'progress': simulatedProgress,
+        });
+
+        Timer? uploadTicker;
         bool uploadCompleted = false;
-        Timer? ticker;
         try {
-          ticker = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+          uploadTicker = Timer.periodic(const Duration(milliseconds: 200), (timer) {
             if (uploadCompleted) {
               timer.cancel();
               return;
             }
-            final remaining = 0.85 - simulatedProgress;
-            final step = (remaining * 0.15).clamp(0.005, 0.05);
-            simulatedProgress = (simulatedProgress + step).clamp(0.01, 0.85);
-            _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'uploading', 'progress': simulatedProgress});
+            final maxProgress = 0.93;
+            final remaining = maxProgress - simulatedProgress;
+            final step = (remaining * 0.25).clamp(0.01, 0.05);
+            simulatedProgress = (simulatedProgress + step).clamp(0.05, maxProgress);
+            _events.add({
+              'type': 'progress',
+              'filename': task.filename,
+              'stage': 'uploading',
+              'progress': simulatedProgress,
+            });
           });
         } catch (_) {}
 
@@ -177,14 +359,17 @@ class UploadQueueService {
           bytes: bytes,
           filename: task.filename,
           contentType: task.contentType,
-          thumbnailBytes: task.thumbnailBytes,
+          thumbnailBytes: thumbnailBytes,
           thumbnailContentType: task.thumbnailContentType,
           metadata: task.metadata,
           projectName: task.projectName,
         );
         uploadCompleted = true;
-        try { ticker?.cancel(); } catch (_) {}
-        _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'finalizing', 'progress': 0.95});
+        try {
+          uploadTicker?.cancel();
+        } catch (_) {}
+
+        _events.add({'type': 'progress', 'filename': task.filename, 'stage': 'finalizing', 'progress': 0.97});
         final mediaJson = _serializeMedia(uploadedMedia);
         final createdProjectId = (mediaJson['metadata'] is Map && mediaJson['metadata']['created_project_id'] is String)
             ? mediaJson['metadata']['created_project_id'] as String
@@ -195,10 +380,20 @@ class UploadQueueService {
           'media': mediaJson,
           if (createdProjectId != null) 'project_id': createdProjectId,
         });
+
+        _queue.removeAt(0);
+        await _persistQueue();
+        if (createdTempFile && sourcePath != null) {
+          await _deleteTempFile(sourcePath);
+        }
       } catch (e) {
         Logger.error('Upload failed', context: {'error': e.toString(), 'filename': task.filename});
-        // Keep a reference for retry
         _failedTasks[task.filename] = task;
+        _queue.removeAt(0);
+        await _persistQueue();
+        if (createdTempFile && sourcePath != null) {
+          await _deleteTempFile(sourcePath);
+        }
         final isOffline = _isOfflineError(e);
         _events.add({
           'type': 'failed',
@@ -208,9 +403,25 @@ class UploadQueueService {
           if (isOffline) 'message': 'No internet connection',
         });
       }
-      await _persistQueue();
     }
     _isProcessing = false;
+  }
+
+  Future<String> _writeTempFile(Uint8List bytes, String filename) async {
+    final dir = await getTemporaryDirectory();
+    final sanitized = filename.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+    final file = File('${dir.path}/upload_$sanitized');
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  }
+
+  Future<void> _deleteTempFile(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
   }
 
   Map<String, dynamic> _serializeMedia(dynamic media) {

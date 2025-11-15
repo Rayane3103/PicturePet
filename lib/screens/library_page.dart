@@ -8,6 +8,9 @@ import '../models/project.dart';
 import '../services/upload_queue_service.dart';
 import 'project_details_page.dart';
 import '../services/projects_events.dart';
+import '../services/ai_jobs_service.dart';
+import '../models/ai_job.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class LibraryPage extends StatefulWidget {
   final void Function()? onNewProject;
@@ -36,6 +39,10 @@ class _LibraryPageState extends State<LibraryPage> {
   bool _hasMore = true;
   int _offset = 0;
   final int _limit = 20;
+  StreamSubscription<AiJob>? _aiJobsSub;
+  final List<AiJob> _inProgressJobs = [];
+  final Set<String> _processedCompletedJobs = {}; // Track jobs that have already been processed
+  bool _isSubscribed = false; // Track if we're already subscribed to avoid duplicate subscriptions
 
   @override
   void initState() {
@@ -50,6 +57,7 @@ class _LibraryPageState extends State<LibraryPage> {
         _loadMore();
       }
     });
+    _restoreAndSubscribeToProjectJobs();
     _uploadSub = UploadQueueService.instance.events.listen((event) {
       if (!mounted) return;
       if (event['type'] == 'completed') {
@@ -117,8 +125,112 @@ class _LibraryPageState extends State<LibraryPage> {
     await _loadMore();
   }
 
+  Future<void> _restoreAndSubscribeToProjectJobs() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+    
+    // Prevent duplicate subscriptions
+    if (_isSubscribed) {
+      // Just refresh the job list without re-subscribing
+      final jobs = await AiJobsService.instance.fetchInProgressProjectJobsForUser(user.id);
+      if (!mounted) return;
+      setState(() {
+        _inProgressJobs.clear();
+        // Only add jobs that are actually in-progress and not already processed
+        _inProgressJobs.addAll(jobs.where((j) => 
+          (j.status == 'queued' || j.status == 'running') && 
+          !_processedCompletedJobs.contains(j.id)
+        ));
+      });
+      return;
+    }
+    
+    // Fetch only in-progress jobs (queued or running)
+    final jobs = await AiJobsService.instance.fetchInProgressProjectJobsForUser(user.id);
+    if (!mounted) return;
+    
+    setState(() {
+      _inProgressJobs.clear();
+      // Only add jobs that are actually in-progress
+      _inProgressJobs.addAll(jobs.where((j) => j.status == 'queued' || j.status == 'running'));
+    });
+    
+    // Subscribe to real-time updates for all user's jobs (only once)
+    AiJobsService.instance.subscribeToUserJobs(user.id);
+    _isSubscribed = true;
+    
+    _aiJobsSub?.cancel();
+    _aiJobsSub = AiJobsService.instance.jobUpdates.listen((AiJob job) {
+      if (!mounted) return;
+      
+      // Skip if we've already processed this job as completed
+      if (_processedCompletedJobs.contains(job.id) && 
+          (job.status == 'completed' || job.status == 'failed' || job.status == 'cancelled')) {
+        return;
+      }
+      
+      final idx = _inProgressJobs.indexWhere((j) => j.id == job.id);
+      final isCompleted = job.status == 'completed' || job.status == 'failed' || job.status == 'cancelled';
+      
+      setState(() {
+        if (isCompleted) {
+          // Remove from in-progress list
+          if (idx != -1) {
+            _inProgressJobs.removeAt(idx);
+          }
+          
+          // Only process completion once and only if it's a completed job (not failed/cancelled)
+          if (job.status == 'completed' && !_processedCompletedJobs.contains(job.id)) {
+            _processedCompletedJobs.add(job.id);
+            
+            // Check if this job should trigger navigation to editor
+            // Only navigate for jobs that have a result URL and project_id
+            // This typically happens for initial generation jobs or jobs that create new content
+            final shouldNavigate = job.resultUrl != null && 
+                                  job.projectId.isNotEmpty &&
+                                  // Only navigate if we're not already on the editor for this project
+                                  // (this prevents navigation when user is already viewing the project)
+                                  !_isCurrentlyViewingProject(job.projectId);
+            
+            if (shouldNavigate) {
+              // Navigate to editor after a short delay to allow UI to update
+              Future.delayed(const Duration(milliseconds: 500), () {
+                if (mounted && widget.onOpenProjectId != null) {
+                  widget.onOpenProjectId!(job.projectId);
+                }
+              });
+            }
+            
+            // Refresh project list to show the newly generated/updated project
+            _refresh();
+          } else if ((job.status == 'failed' || job.status == 'cancelled') && 
+                     !_processedCompletedJobs.contains(job.id)) {
+            _processedCompletedJobs.add(job.id);
+            // Just refresh to update UI, don't navigate
+            _refresh();
+          }
+        } else if (job.status == 'queued' || job.status == 'running') {
+          // Update or add in-progress job
+          if (idx != -1) {
+            _inProgressJobs[idx] = job;
+          } else {
+            // Only add if it's not already processed as completed
+            if (!_processedCompletedJobs.contains(job.id)) {
+              _inProgressJobs.add(job);
+            }
+          }
+        }
+      });
+    });
+  }
+
   @override
   void dispose() {
+    _aiJobsSub?.cancel();
+    if (_isSubscribed) {
+      AiJobsService.instance.unsubscribeUserJobs();
+      _isSubscribed = false;
+    }
     _uploadSub?.cancel();
     _projectsSub?.cancel();
     _scroll.dispose();
@@ -127,6 +239,15 @@ class _LibraryPageState extends State<LibraryPage> {
 
   void _open(Project p) {
     widget.onOpenProjectId?.call(p.id);
+  }
+
+  // Helper to check if we're currently viewing a specific project
+  // This is a simple check - in a more complex app, you might want to track the current route
+  bool _isCurrentlyViewingProject(String projectId) {
+    // For now, we'll assume we're not viewing any project
+    // This prevents unnecessary navigation when jobs complete
+    // In the future, you could track the current route or project being viewed
+    return false;
   }
 
   Widget _card(Project p) {
@@ -175,54 +296,17 @@ class _LibraryPageState extends State<LibraryPage> {
                 ),
               ),
               Positioned(
-                bottom: 12,
-                left: 12,
+                top: 12,
                 right: 12,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.7),
-                    borderRadius: BorderRadius.circular(12),
+                    color: Colors.black.withOpacity(0.45),
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        p.name,
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.schedule,
-                            color: Colors.white70,
-                            size: 12,
-                          ),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              _formatDate(p.updatedAt.toLocal()),
-                              style: GoogleFonts.inter(
-                                color: Colors.white70,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w500,
-                              ),
-                              maxLines: 2,
-                              //overflow: TextOverflow.clip,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          _projectActions(p),
-                        ],
-                      ),
-                    ],
+                  child: SizedBox(
+                    height: 36,
+                    width: 36,
+                    child: _projectActions(p),
                   ),
                 ),
               ),
@@ -366,6 +450,23 @@ class _LibraryPageState extends State<LibraryPage> {
     final isFailed = type == 'failed';
     final isOffline = (e['code'] as String?) == 'offline';
     final isPreparing = type == 'preparing';
+    final stage = (e['stage'] as String?) ?? (isPreparing ? 'generating' : 'uploading');
+    final isGeneratingStage = stage == 'generating';
+    final isProcessingStage = stage == 'processing';
+    final isFinalizingStage = stage == 'finalizing';
+    final bool showIndeterminate = isPreparing || (isGeneratingStage && (progress == null || progress <= 0));
+    final double? indicatorValue = showIndeterminate ? null : progress?.clamp(0, 1);
+
+    String statusLabel;
+    if (isPreparing || isGeneratingStage) {
+      statusLabel = 'Generating...';
+    } else if (isProcessingStage) {
+      statusLabel = 'Processing...';
+    } else if (isFinalizingStage) {
+      statusLabel = 'Finalizing...';
+    } else {
+      statusLabel = 'Uploading';
+    }
 
     return Container(
       height: 300,
@@ -397,13 +498,13 @@ class _LibraryPageState extends State<LibraryPage> {
                           width: 72,
                           height: 72,
                           child: CircularProgressIndicator(
-                            value: isPreparing ? null : progress,
+                            value: indicatorValue,
                             strokeWidth: 6,
                             color: AppColors.primaryPurple,
                             backgroundColor: AppColors.surface(context),
                           ),
                         ),
-                        if (isPreparing)
+                        if (showIndeterminate)
                           Icon(
                             Icons.auto_awesome,
                             color: AppColors.primaryPurple,
@@ -422,7 +523,7 @@ class _LibraryPageState extends State<LibraryPage> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    isPreparing ? 'Generating...' : 'Uploading',
+                    statusLabel,
                     style: GoogleFonts.inter(
                       color: AppColors.onBackground(context),
                       fontWeight: FontWeight.w600,
@@ -447,18 +548,174 @@ class _LibraryPageState extends State<LibraryPage> {
                     label: Text(isOffline ? 'Retry when online' : 'Retry'),
                   ),
                 ],
-                const SizedBox(height: 8),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Text(
-                    filename,
-                    style: GoogleFonts.inter(
-                      color: AppColors.secondaryText(context),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _aiJobProgressCard(AiJob job) {
+    final stage = job.status;
+    final String statusLabel;
+    IconData statusIcon;
+    if (stage == 'queued') {
+      statusLabel = 'Queued';
+      statusIcon = Icons.hourglass_empty_rounded;
+    } else if (stage == 'running') {
+      statusLabel = 'Generating';
+      statusIcon = Icons.auto_awesome_rounded;
+    } else {
+      statusLabel = 'Processing';
+      statusIcon = Icons.sync_rounded;
+    }
+    
+    final prompt = job.payload['prompt']?.toString() ?? 'AI Generation';
+    
+    return Container(
+      height: 300,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppColors.primaryPurple.withOpacity(0.15),
+            AppColors.primaryBlue.withOpacity(0.12),
+            AppColors.card(context),
+          ],
+          stops: const [0.0, 0.5, 1.0],
+        ),
+        borderRadius: BorderRadius.circular(AppTheme.cardCornerRadius),
+        border: Border.all(
+          color: AppColors.primaryPurple.withOpacity(0.2),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primaryPurple.withOpacity(0.15),
+            blurRadius: 20,
+            spreadRadius: 0,
+            offset: const Offset(0, 8),
+          ),
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 12,
+            spreadRadius: 0,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          // Animated gradient overlay
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppTheme.cardCornerRadius),
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    AppColors.primaryPurple.withOpacity(0.08),
+                    Colors.transparent,
+                    AppColors.primaryBlue.withOpacity(0.05),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // Content
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Icon with animated gradient circle
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: AppGradients.primary,
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.primaryPurple.withOpacity(0.4),
+                        blurRadius: 20,
+                        spreadRadius: 0,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      // Animated circular progress indicator (spinning animation)
+                      SizedBox(
+                        width: 80,
+                        height: 80,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 4,
+                          valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                          backgroundColor: Colors.white.withOpacity(0.15),
+                        ),
+                      ),
+                      // Icon
+                      Icon(
+                        statusIcon,
+                        color: Colors.white,
+                        size: 36,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                // Status label
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryPurple.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: AppColors.primaryPurple.withOpacity(0.3),
+                      width: 1,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  ),
+                  child: Text(
+                    statusLabel,
+                    style: GoogleFonts.inter(
+                      color: AppColors.primaryPurple,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                // Prompt text
+                Flexible(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppColors.card(context).withOpacity(0.6),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AppColors.muted(context).withOpacity(0.3),
+                        width: 1,
+                      ),
+                    ),
+                    child: Text(
+                      prompt,
+                      textAlign: TextAlign.center,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                        color: AppColors.onBackground(context),
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -469,67 +726,29 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
-  String _formatDate(DateTime dt) {
-    final yy = (dt.year % 100).toString().padLeft(2, '0');
-    final mm = dt.month.toString().padLeft(2, '0');
-    final dd = dt.day.toString().padLeft(2, '0');
-    final hh = dt.hour.toString().padLeft(2, '0');
-    final min = dt.minute.toString().padLeft(2, '0');
-    return '$yy-$mm-$dd  $hh:$min';
-  }
-
   Widget _grid() {
-    // Build a combined list: uploading placeholders first, then projects
+    // Compose grid: in-progress AI jobs, uploading placeholders, then project cards
+    // Filter out projects that have associated in-progress AI jobs to avoid showing placeholder cards
+    final inProgressProjectIds = _inProgressJobs.map((j) => j.projectId).toSet();
+    final filteredProjects = _items.where((p) => !inProgressProjectIds.contains(p.id)).toList();
+    
     final placeholders = _uploadStatuses
         .where((e) => e['type'] == 'progress' || e['type'] == 'started' || e['type'] == 'failed' || e['type'] == 'preparing')
         .toList();
-
-    // Show empty state only if nothing is uploading and there are no projects
-    if (_items.isEmpty && placeholders.isEmpty && !_loading) {
-      return SliverToBoxAdapter(
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: AppColors.card(context),
-            borderRadius: BorderRadius.circular(AppTheme.cardCornerRadius),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'No projects yet',
-                style: GoogleFonts.inter(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.onBackground(context),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Tap "Create New Project" to start.',
-                style: GoogleFonts.inter(
-                  fontSize: 14,
-                  color: AppColors.secondaryText(context),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-    final totalCount = placeholders.length + _items.length;
-
+    final totalCount = _inProgressJobs.length + placeholders.length + filteredProjects.length;
     return SliverMasonryGrid.count(
       crossAxisCount: 2,
       mainAxisSpacing: 20,
       crossAxisSpacing: 20,
       childCount: totalCount,
       itemBuilder: (context, index) {
-        if (index < placeholders.length) {
-          return _uploadPlaceholderCard(placeholders[index]);
+        if (index < _inProgressJobs.length) {
+          return _aiJobProgressCard(_inProgressJobs[index]);
         }
-        final proj = _items[index - placeholders.length];
+        if (index < _inProgressJobs.length + placeholders.length) {
+          return _uploadPlaceholderCard(placeholders[index - _inProgressJobs.length]);
+        }
+        final proj = filteredProjects[index - _inProgressJobs.length - placeholders.length];
         return KeyedSubtree(key: ValueKey(proj.id), child: _card(proj));
       },
     );
@@ -545,27 +764,63 @@ class _LibraryPageState extends State<LibraryPage> {
           child: Container(
             padding: const EdgeInsets.all(24),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              // crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.start,
               children: [
-                // Title section
-                Text(
-                  'Projects Dashboard',
-                  style: GoogleFonts.inter(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.onBackground(context),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Manage your projects and track your progress',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    color: AppColors.secondaryText(context),
-                  ),
+                // Title section with brand logo
+                Row(
+                  // crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 90,
+                      height: 90,
+                      decoration: BoxDecoration(
+                        gradient: AppGradients.primary,
+                        borderRadius: BorderRadius.circular(24),
+                     
+                      ),
+                      child: Container(
+                        margin: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: AppColors.card(context),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Image.asset(
+                            'assets/images/logo.png',
+                            fit: BoxFit.contain,
+                          
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 20),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          
+                          Text(
+                            'Projects Dashboard',
+                            style: GoogleFonts.inter(
+                              fontSize: 28,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.onBackground(context),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Manage your projects and track your progress',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              color: AppColors.secondaryText(context),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 24),
-                
+
                 // Credits and subscription section
                 Row(
                   mainAxisAlignment: MainAxisAlignment.start,
