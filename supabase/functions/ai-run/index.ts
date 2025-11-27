@@ -678,10 +678,22 @@ async function runFalIdeogramCharacterEdit(
   throw new Error(`Timeout: Character edit job did not complete after ${attempts} polling attempts (~10 minutes)`)
 }
 
-async function uploadToStorage(userId: string, bytes: Uint8Array): Promise<{ url: string; path: string }> {
-  const path = `u/${userId}/${Date.now()}/ai-output.jpg`
+async function uploadToStorage(userId: string, bytes: Uint8Array, forcePng: boolean = false): Promise<{ url: string; path: string }> {
+  // Detect image format: check if it's PNG (supports transparency)
+  const isPng = bytes.length >= 4 && 
+    bytes[0] === 0x89 && 
+    bytes[1] === 0x50 && 
+    bytes[2] === 0x4e && 
+    bytes[3] === 0x47
+  
+  // Use PNG format if forced (e.g., for background removal) or if image is already PNG
+  const usePng = forcePng || isPng
+  const ext = usePng ? 'png' : 'jpg'
+  const contentType = usePng ? 'image/png' : 'image/jpeg'
+  const path = `u/${userId}/${Date.now()}/ai-output.${ext}`
+  
   const { error } = await supabase.storage.from('media').upload(path, bytes, {
-    contentType: 'image/jpeg',
+    contentType,
     upsert: false,
   })
   if (error) throw error
@@ -736,6 +748,7 @@ async function processJob(job: AiJobRow): Promise<void> {
         const prompt = (job.payload as Record<string, unknown>)['prompt'] as string
         const inputUrl = job.input_image_url as string
         outputBytes = await runFalNanoBananaEdit(inputUrl, prompt)
+        // Force PNG format for background removal to preserve transparency
         break
       }
       case 'calligrapher': {
@@ -796,7 +809,9 @@ async function processJob(job: AiJobRow): Promise<void> {
         throw new Error(`Unknown tool ${job.tool_name}`)
     }
 
-    const uploaded = await uploadToStorage(job.user_id, outputBytes)
+    // For background removal, force PNG format to preserve transparency
+    const forcePng = job.tool_name === 'remove_background'
+    const uploaded = await uploadToStorage(job.user_id, outputBytes, forcePng)
 
     // Update job
     await supabase

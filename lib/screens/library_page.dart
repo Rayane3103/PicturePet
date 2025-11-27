@@ -11,6 +11,8 @@ import '../services/projects_events.dart';
 import '../services/ai_jobs_service.dart';
 import '../models/ai_job.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/credits_service.dart';
+import 'buy_credits_page.dart';
 
 class LibraryPage extends StatefulWidget {
   final void Function()? onNewProject;
@@ -43,11 +45,13 @@ class _LibraryPageState extends State<LibraryPage> {
   final List<AiJob> _inProgressJobs = [];
   final Set<String> _processedCompletedJobs = {}; // Track jobs that have already been processed
   bool _isSubscribed = false; // Track if we're already subscribed to avoid duplicate subscriptions
+  final CreditsService _creditsService = CreditsService.instance;
 
   @override
   void initState() {
     super.initState();
     _loadMore();
+    _creditsService.ensureLoaded();
     _scroll.addListener(() {
       if (_loading || !_hasMore) return;
       final max = _scroll.position.maxScrollExtent;
@@ -239,6 +243,15 @@ class _LibraryPageState extends State<LibraryPage> {
 
   void _open(Project p) {
     widget.onOpenProjectId?.call(p.id);
+  }
+
+  Future<void> _openBuyCredits() async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => const BuyCreditsPage()),
+    );
+    if (result == true) {
+      await _creditsService.refresh(force: true);
+    }
   }
 
   // Helper to check if we're currently viewing a specific project
@@ -826,35 +839,60 @@ class _LibraryPageState extends State<LibraryPage> {
                   mainAxisAlignment: MainAxisAlignment.start,
                   children: [
                     // Credits badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: AppColors.muted(context),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.max,
-                        children: [
-                          Icon(
-                            Icons.eco,
-                            color: AppColors.successGreen,
-                            size: 16,
+                    ValueListenableBuilder<CreditsState>(
+                      valueListenable: _creditsService.notifier,
+                      builder: (context, creditsState, _) {
+                        final bool hasError = creditsState.hasError;
+                        final String label = hasError
+                            ? creditsState.error ?? 'Unable to load credits'
+                            : '${creditsState.amount ?? 0} Credits available';
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: AppColors.muted(context),
+                            borderRadius: BorderRadius.circular(20),
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '50 Credits available',
-                            style: GoogleFonts.inter(
-                              color: AppColors.onBackground(context),
-                              fontWeight: FontWeight.w600,
-                              fontSize: 11,
-                            ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.max,
+                            children: [
+                              Icon(
+                                hasError ? Icons.error_outline : Icons.eco,
+                                color: hasError ? Colors.redAccent : AppColors.successGreen,
+                                size: 16,
+                              ),
+                              const SizedBox(width: 8),
+                              if (creditsState.isLoading) ...[
+                                const SizedBox(
+                                  height: 12,
+                                  width: 12,
+                                  child: CircularProgressIndicator(strokeWidth: 2.2),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Refreshing credits...',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.onBackground(context),
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ] else
+                                Text(
+                                  label,
+                                  style: GoogleFonts.inter(
+                                    color: hasError ? Colors.redAccent : AppColors.onBackground(context),
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                            ],
                           ),
-                        ],
-                      ),
+                        );
+                      },
                     ),
                     SizedBox(width: MediaQuery.of(context).size.width * 0.035),
                     TextButton(
-                      onPressed: () {},
+                      onPressed: _openBuyCredits,
                       style: TextButton.styleFrom(
                         backgroundColor: AppColors.muted(context),
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),

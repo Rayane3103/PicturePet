@@ -121,7 +121,7 @@ class _OnboardingSplashState extends State<OnboardingSplash>
             FadeTransition(
               opacity: _fadeAnimation,
               child: Text(
-                'MediaPet',
+                'PicturePet',
                 style: GoogleFonts.inter(
                   color: AppColors.onBackground(context),
                   fontSize: 36,

@@ -18,6 +18,8 @@ import '../widgets/app_drawer.dart';
 import 'editor_page.dart';
 import 'library_page.dart';
 import 'profile_page.dart';
+import '../exceptions/credits_exceptions.dart';
+import 'buy_credits_page.dart';
 
 class HomeShell extends StatefulWidget {
   final ThemeMode themeMode;
@@ -321,18 +323,43 @@ class _HomeShellState extends State<HomeShell> {
         'prompt': prompt,
       });
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('AI generation failed: $e'),
-          backgroundColor: Colors.redAccent,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      if (e is InsufficientCreditsException) {
+        _showBuyCreditsSnack(e);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('AI generation failed. Please try again.'),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _aiGenerating = false);
       }
     }
+  }
+
+  void _showBuyCreditsSnack(InsufficientCreditsException error) {
+    final required = error.requiredCredits;
+    final message = required != null
+        ? 'This tool needs $required credits. Please add more credits to continue.'
+        : 'You have run out of credits. Please buy more to keep generating.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'Buy credits',
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const BuyCreditsPage()),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   String _deriveProjectNameFromPrompt(String prompt) {

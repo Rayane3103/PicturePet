@@ -26,11 +26,14 @@ import '../models/media_item.dart';
 import 'reframe_presets.dart';
 import '../utils/logger.dart';
 import '../utils/export_utils.dart';
+import '../utils/error_message_helper.dart';
 import 'package:share_plus/share_plus.dart';
 import 'dart:math' as math;
 import 'package:permission_handler/permission_handler.dart';
 import '../widgets/mask_brush_painter.dart';
 import 'package:image_picker/image_picker.dart';
+import '../exceptions/credits_exceptions.dart';
+import 'buy_credits_page.dart';
 
 class _AllowAllScrollBehavior extends ScrollBehavior {
   const _AllowAllScrollBehavior();
@@ -264,7 +267,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = 'Failed to load project: ${e.toString()}';
+        _error = ErrorMessageHelper.getUserFriendlyMessage(e);
       });
     }
   }
@@ -291,7 +294,13 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         final int h = decoded.height;
         if (w > maxSide || h > maxSide) {
           final resized = img.copyResize(decoded, width: w > h ? maxSide : null, height: h >= w ? maxSide : null);
-          raw = img.encodeJpg(resized, quality: 90);
+          // Preserve transparency: if image has alpha channel, encode as PNG; otherwise JPEG
+          final bool hasTransparency = resized.hasAlpha;
+          if (hasTransparency) {
+            raw = img.encodePng(resized);
+          } else {
+            raw = img.encodeJpg(resized, quality: 90);
+          }
         }
       }
       if (!mounted) return;
@@ -303,7 +312,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = 'Failed to load image${kIsWeb ? ' (web)' : ''}: ${e.toString()}';
+        _error = ErrorMessageHelper.getUserFriendlyMessage(e);
       });
     }
   }
@@ -1475,7 +1484,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = ErrorMessageHelper.getUserFriendlyMessage(e);
       });
       _showSaveErrorSnack();
     } finally {
@@ -1624,6 +1633,55 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     });
   }
 
+  void _handleJobQueueError(Object error, {required String fallbackMessage}) {
+    if (!mounted) return;
+    if (error is InsufficientCreditsException) {
+      _showInsufficientCreditsPrompt(error);
+      return;
+    }
+    final friendly = ErrorMessageHelper.getUserFriendlyMessage(error);
+    setState(() {
+      _error = friendly;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Colors.redAccent,
+        content: Text(
+          fallbackMessage,
+          style: const TextStyle(color: Colors.white),
+        ),
+      ),
+    );
+  }
+
+  void _showInsufficientCreditsPrompt(InsufficientCreditsException error) {
+    final required = error.requiredCredits;
+    final tool = error.toolName;
+    final String copy;
+    if (required != null && tool != null) {
+      copy = '"$tool" needs $required credits. Add more to continue.';
+    } else if (required != null) {
+      copy = 'This tool costs $required credits. Add more to continue.';
+    } else {
+      copy = 'You do not have enough credits. Purchase more to keep creating.';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        content: Text(copy),
+        action: SnackBarAction(
+          label: 'Buy credits',
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const BuyCreditsPage()),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   // Placeholder AI action handlers (hook your real AI here)
   Future<void> _onRemoveBackground() async {
     if (_imageBytes == null) return;
@@ -1669,16 +1727,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
         'error': e.toString(),
       });
       if (!mounted) return;
-      setState(() {
-        _error = 'Failed to start job: ${e.toString()}';
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: Colors.redAccent,
-          content: Text('Failed to start AI job', style: TextStyle(color: Colors.white)),
-        ),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start AI job');
     } finally {
       if (mounted) {
         // Keep overlay if there are active jobs; otherwise hide
@@ -1725,10 +1774,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing style_transfer failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start style transfer: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start style transfer');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -1768,10 +1814,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing seedvr_upscale failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start upscaler: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start upscale');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -2131,32 +2174,32 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       _StylePreset(
         name: 'Van Gogh',
         prompt: "in the style of Vincent van Gogh's Starry Night swirling brushstrokes vivid blues and yellows",
-        asset: 'assets/images/filter.png',
+        asset: 'assets/images/Styles/Vangogh.png',
       ),
       _StylePreset(
         name: 'Ghibli',
         prompt: 'Studio Ghibli painterly whimsical soft colors gentle lighting anime aesthetic',
-        asset: 'assets/images/filter.png',
+        asset: 'assets/images/Styles/Ghibli.png',
       ),
       _StylePreset(
         name: 'Watercolor',
         prompt: 'watercolor painting soft bleeding edges paper texture pastel tones',
-        asset: 'assets/images/filter.png',
+        asset: 'assets/images/Styles/Watercolor.png',
       ),
       _StylePreset(
         name: 'Oil Paint',
         prompt: 'thick oil paint impasto dramatic lighting rich contrast canvas texture',
-        asset: 'assets/images/filter.png',
+        asset: 'assets/images/Styles/Oilpaint.png',
       ),
       _StylePreset(
         name: 'Cyberpunk',
         prompt: 'neon cyberpunk city glow magenta cyan rim light futuristic high contrast',
-        asset: 'assets/images/filter.png',
+        asset: 'assets/images/Styles/Cyberpunk.png',
       ),
       _StylePreset(
         name: 'Toon',
         prompt: 'bold outlines cel shaded cartoon simplified shapes vibrant palette',
-        asset: 'assets/images/filter.png',
+        asset: 'assets/images/Styles/Toon.png',
       ),
     ];
 
@@ -2544,10 +2587,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing elements failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start elements remix: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start Elements remix');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -2591,10 +2631,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing ideogram_v3_reframe failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start reframe: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start reframe');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -2643,10 +2680,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing ideogram_character_edit failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start character edit: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start character edit');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -2689,10 +2723,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing calligrapher failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start calligrapher: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start calligrapher');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -3381,46 +3412,51 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
                       ),
                       const SizedBox(height: 32),
                       // Action Button
-                      Container(
-                        decoration: BoxDecoration(
-                          gradient: AppGradients.primary,
-                          borderRadius: BorderRadius.circular(16),
-                          boxShadow: [
-                            BoxShadow(
-                              color: AppColors.primaryPurple.withOpacity(0.4),
-                              blurRadius: 16,
-                              offset: const Offset(0, 8),
-                            ),
-                          ],
-                        ),
-                        child: ElevatedButton.icon(
-                  onPressed: () {
-                    final p = promptCtrl.text.trim();
-                    if (p.isEmpty) {
-                      Navigator.of(ctx).pop();
-                    } else {
-                      Navigator.of(ctx).pop(p);
-                    }
-                  },
-                          icon: const Icon(
-                            Icons.auto_awesome_rounded,
-                            color: Colors.white,
+                      SizedBox(
+                        width: double.infinity,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            gradient: AppGradients.primary,
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(
+                                color: AppColors.primaryPurple.withOpacity(0.4),
+                                blurRadius: 16,
+                                offset: const Offset(0, 8),
+                              ),
+                            ],
                           ),
-                          label: Text(
-                            'Start Remix',
-                            style: GoogleFonts.inter(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 16,
-                              letterSpacing: 0.5,
+                          child: ElevatedButton.icon(
+                    onPressed: () {
+                      final p = promptCtrl.text.trim();
+                      if (p.isEmpty) {
+                        Navigator.of(ctx).pop();
+                      } else {
+                        Navigator.of(ctx).pop(p);
+                      }
+                    },
+                            icon: const Icon(
+                              Icons.auto_awesome_rounded,
+                              color: Colors.white,
                             ),
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.transparent,
-                            foregroundColor: Colors.white,
-                            shadowColor: Colors.transparent,
-                            padding: const EdgeInsets.symmetric(vertical: 18),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
+                            label: Text(
+                              'Start Remix',
+                              style: GoogleFonts.inter(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 16,
+                                letterSpacing: 0.5,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              foregroundColor: Colors.white,
+                              shadowColor: Colors.transparent,
+                              padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              minimumSize: const Size(double.infinity, 0),
                             ),
                           ),
                         ),
@@ -3469,10 +3505,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     } catch (e) {
       Logger.error('Queueing remix failed', context: {'error': e.toString()});
       if (!mounted) return;
-      setState(() { _error = 'Failed to start remix: ${e.toString()}'; });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(behavior: SnackBarBehavior.floating, backgroundColor: Colors.redAccent, content: Text('Failed to start', style: TextStyle(color: Colors.white))),
-      );
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start remix');
     } finally {
       if (mounted) setState(() { _saving = _activeJobIds.isNotEmpty; });
     }
@@ -3854,9 +3887,12 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       });
       if (!mounted) return;
       setState(() {
-        _nanoError = e.toString();
+        _nanoError = e is InsufficientCreditsException
+            ? 'Not enough credits to run this tool.'
+            : ErrorMessageHelper.getUserFriendlyMessage(e);
         _nanoIsGenerating = false;
       });
+      _handleJobQueueError(e, fallbackMessage: 'Failed to start nano job');
     } finally {
       if (mounted) {
         setState(() {
